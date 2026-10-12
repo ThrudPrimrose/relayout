@@ -27,11 +27,12 @@ fortran = ["dace-fortran", "nanobind"]
 dev = ["pytest", "pytest-timeout", "ruff", "pre-commit"]
 
 [tool.uv.sources]
-dace = { git = "https://github.com/spcl/dace.git", branch = "extended" }
-dace-fortran = { git = "ssh://git@github.com/spcl/dace-fortran.git", branch = "main" }
+# dace comes from the override below, not from a source: uv applies a git dependency's sources, so a dace source here
+# would conflict with the dace commit a project that depends on relayout (hpcagent-bench) pins.
+dace-fortran = { git = "https://github.com/spcl/dace-fortran.git", branch = "main" }
 
 [tool.uv]
-# dace-fortran pins dace@FaCe; one dace for both.
+# relayout as the root project: dace@extended, also over the dace@FaCe dace-fortran pins.
 override-dependencies = ["dace @ git+https://github.com/spcl/dace.git@extended"]
 
 [tool.hatch.build.targets.wheel]

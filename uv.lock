@@ -17,7 +17,7 @@ resolution-markers = [
 ]
 
 [manifest]
-overrides = [{ name = "dace", git = "https://github.com/spcl/dace.git?branch=extended" }]
+overrides = [{ name = "dace", git = "https://github.com/spcl/dace.git?rev=extended" }]
 
 [[package]]
 name = "astunparse"
@@ -88,7 +88,7 @@ wheels = [
 [[package]]
 name = "dace"
 version = "2.0.0a10"
-source = { git = "https://github.com/spcl/dace.git?branch=extended#d73f3167994b2fb06f458f71edac66366f1631fc" }
+source = { git = "https://github.com/spcl/dace.git?rev=extended#6c00040ab1afb9b03b2d2b00dd58ccf567b5d1b8" }
 dependencies = [
     { name = "astunparse" },
     { name = "click" },
@@ -103,6 +103,7 @@ dependencies = [
     { name = "ordered-set" },
     { name = "packaging" },
     { name = "ply" },
+    { name = "pygments" },
     { name = "pyreadline", marker = "sys_platform == 'win32'" },
     { name = "pyyaml" },
     { name = "scikit-build" },
@@ -114,7 +115,7 @@ dependencies = [
 [[package]]
 name = "dace-fortran"
 version = "1.0.0"
-source = { git = "ssh://git@github.com/spcl/dace-fortran.git?branch=main#a65937ea39a4869b8bf9c3a28736252ed98a365e" }
+source = { git = "https://github.com/spcl/dace-fortran.git?branch=main#a65937ea39a4869b8bf9c3a28736252ed98a365e" }
 dependencies = [
     { name = "dace" },
     { name = "fparser" },
@@ -585,8 +586,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "dace", git = "https://github.com/spcl/dace.git?branch=extended" },
-    { name = "dace-fortran", marker = "extra == 'fortran'", git = "ssh://git@github.com/spcl/dace-fortran.git?branch=main" },
+    { name = "dace" },
+    { name = "dace-fortran", marker = "extra == 'fortran'", git = "https://github.com/spcl/dace-fortran.git?branch=main" },
     { name = "islpy" },
     { name = "mpi4py", marker = "extra == 'mpi'" },
     { name = "nanobind", marker = "extra == 'fortran'" },
