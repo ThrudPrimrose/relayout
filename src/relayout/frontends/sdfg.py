@@ -372,6 +372,8 @@ def expand_copy(state: SDFGState, node: CopyLibraryNode) -> None:
         return ", ".join(index)
 
     src, dst = source.data.data, target.data.data
+    if not (isinstance(source.src, nodes.AccessNode) and isinstance(target.dst, nodes.AccessNode)) or not (src and dst):
+        raise LayoutError(f"{state.label}: copy {node.label!r} does not run between two access nodes")
     state.add_mapped_tasklet(
         f"{node.label}_points",
         {p: f"0:{size}" for p, size in zip(params, sizes[0], strict=True)} or {"__c": "0:1"},

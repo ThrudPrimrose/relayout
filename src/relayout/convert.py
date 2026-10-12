@@ -311,7 +311,7 @@ def placement(
 
 
 def to_layout(
-    logical: npt.NDArray[np.generic], layout: IndexMap, sizes: Mapping[str, int], dtype: npt.DTypeLike = None
+    logical: npt.NDArray[np.generic], layout: IndexMap, sizes: Mapping[str, int], dtype: npt.DTypeLike | None = None
 ) -> npt.NDArray[np.generic]:
     """The laid-out buffer of ``logical`` at ``dtype`` (default: its own), zero in dead cells: the numpy
     form of the ``relayout_in`` kernel."""
@@ -322,7 +322,7 @@ def to_layout(
 
 
 def from_layout(
-    stored: npt.NDArray[np.generic], layout: IndexMap, sizes: Mapping[str, int], dtype: npt.DTypeLike = None
+    stored: npt.NDArray[np.generic], layout: IndexMap, sizes: Mapping[str, int], dtype: npt.DTypeLike | None = None
 ) -> npt.NDArray[np.generic]:
     """The logical array ``stored`` holds at ``dtype``: the numpy form of the ``relayout_out`` kernel."""
     index, live = placement(layout, sizes)
