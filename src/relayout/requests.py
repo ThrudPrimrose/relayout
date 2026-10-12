@@ -40,7 +40,7 @@ from relayout.ops import (
     Startup,
     Width,
     check_index_expr,
-    is_reserved,
+    optional_inner,
 )
 
 __all__ = [
@@ -58,41 +58,18 @@ __all__ = [
 ]
 
 
-def parse_name(value: object, where: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"{where} must be a name; got {value!r}")
+def parse_str(value: object, where: str) -> str:
+    """A JSON string; what it may name is the operation's check (:data:`relayout.ops.FIELD_CHECKS`)."""
+    if not isinstance(value, str):
+        raise ValueError(f"{where} must be a string; got {value!r}")
     return value
 
 
-def parse_names(value: object, where: str) -> tuple[str, ...]:
-    if not isinstance(value, list) or len(value) < len(("one", "two")):
-        raise ValueError(f"{where} must be a list of two or more names; got {value!r}")
-    names = tuple(parse_name(v, f"{where}[{k}]") for k, v in enumerate(value))
-    if len(set(names)) != len(names):
-        raise ValueError(f"{where} names one twice: {list(names)}")
-    return names
-
-
-def parse_digit_name(value: object, where: str) -> str:
-    if not isinstance(value, str) or not value.isidentifier() or is_reserved(value):
-        raise ValueError(f"{where} must be a digit name (an identifier other than P, P0, P1, ...); got {value!r}")
-    return value
-
-
-def parse_digit_names(value: object, where: str) -> tuple[str, ...]:
-    if not isinstance(value, list) or not value:
-        raise ValueError(f"{where} must be a non-empty list of digit names; got {value!r}")
-    names = tuple(parse_digit_name(v, f"{where}[{k}]") for k, v in enumerate(value))
-    if len(set(names)) != len(names):
-        raise ValueError(f"{where} names a digit twice: {list(names)}")
-    return names
-
-
-def parse_digit_pair(value: object, where: str) -> tuple[str, ...]:
-    names = parse_digit_names(value, where)
-    if len(names) != len(("coarse", "fine")):
-        raise ValueError(f"{where} must name the two digits the cut leaves, coarse then fine; got {list(names)}")
-    return names
+def parse_strs(value: object, where: str) -> tuple[str, ...]:
+    """A JSON list of strings."""
+    if not isinstance(value, list):
+        raise ValueError(f"{where} must be a list of strings; got {value!r}")
+    return tuple(parse_str(v, f"{where}[{k}]") for k, v in enumerate(value))
 
 
 def non_negative_int(value: object, where: str) -> int:
@@ -117,13 +94,7 @@ def int_list(value: object, where: str) -> tuple[int, ...]:
 def parse_expr(value: object, where: str) -> str:
     if isinstance(value, bool) or not isinstance(value, (int, str)):
         raise ValueError(f"{where} must be an int or an integer expression; got {value!r}")
-    return check_index_expr(str(value), where)
-
-
-def parse_index_exprs(value: object, where: str) -> tuple[str, ...]:
-    if not isinstance(value, list) or not value or not all(isinstance(v, str) for v in value):
-        raise ValueError(f"{where} must be a list of index expressions over the shuffled digits; got {value!r}")
-    return tuple(check_index_expr(v, f"{where}[{k}]") for k, v in enumerate(value))
+    return str(value)
 
 
 def parse_bit_matrix(value: object, where: str) -> tuple[tuple[int, ...], ...]:
@@ -168,23 +139,21 @@ NAME_SCHEMA = {"type": "string", "minLength": 1}
 EXPR_SCHEMA = {"type": ["integer", "string"]}
 #: Field type -> codec. An operation may only declare fields of these types (or ``T | None`` of them).
 FIELD_CODECS: dict[object, FieldCodec] = {
-    ArrayName: FieldCodec(parse_name, schema=NAME_SCHEMA),
-    ArrayNames: FieldCodec(parse_names, schema={"type": "array", "items": NAME_SCHEMA, "minItems": 2}),
-    DigitName: FieldCodec(parse_digit_name, schema=NAME_SCHEMA),
-    DigitNames: FieldCodec(parse_digit_names, schema={"type": "array", "items": NAME_SCHEMA, "minItems": 1}),
-    DigitPair: FieldCodec(
-        parse_digit_pair, schema={"type": "array", "items": NAME_SCHEMA, "minItems": 2, "maxItems": 2}
-    ),
+    ArrayName: FieldCodec(parse_str, schema=NAME_SCHEMA),
+    ArrayNames: FieldCodec(parse_strs, schema={"type": "array", "items": NAME_SCHEMA, "minItems": 2}),
+    DigitName: FieldCodec(parse_str, schema=NAME_SCHEMA),
+    DigitNames: FieldCodec(parse_strs, schema={"type": "array", "items": NAME_SCHEMA, "minItems": 1}),
+    DigitPair: FieldCodec(parse_strs, schema={"type": "array", "items": NAME_SCHEMA, "minItems": 2, "maxItems": 2}),
     Dim: FieldCodec(non_negative_int, schema={"type": "integer", "minimum": 0}),
     GridDim: FieldCodec(non_negative_int, schema={"type": "integer", "minimum": 0}),
     Width: FieldCodec(positive_int, schema={"type": "integer", "minimum": 1}),
     Expr: FieldCodec(parse_expr, expr_json, EXPR_SCHEMA),
-    IndexExprs: FieldCodec(parse_index_exprs, schema={"type": "array", "items": {"type": "string"}}),
+    IndexExprs: FieldCodec(parse_strs, schema={"type": "array", "items": {"type": "string"}}),
     Bits: FieldCodec(int_list, schema={"type": "array", "items": {"type": "integer", "minimum": 0}}),
     BitMatrix: FieldCodec(
         parse_bit_matrix, schema={"type": "array", "items": {"type": "array", "items": {"enum": [0, 1]}}}
     ),
-    FormatLabel: FieldCodec(parse_name, schema=NAME_SCHEMA),
+    FormatLabel: FieldCodec(parse_str, schema=NAME_SCHEMA),
     Scheme: enum_codec(Scheme),
     Location: enum_codec(Location),
     Precision: enum_codec(Precision),
@@ -193,10 +162,8 @@ FIELD_CODECS: dict[object, FieldCodec] = {
 
 def field_codec(hint: object) -> tuple[FieldCodec | None, bool]:
     """``hint``'s codec and whether the field is optional (``T | None``)."""
-    if isinstance(hint, types.UnionType) and type(None) in hint.__args__:
-        (inner,) = (arg for arg in hint.__args__ if arg is not type(None))
-        return FIELD_CODECS.get(inner), True
-    return FIELD_CODECS.get(hint), False
+    inner, optional = optional_inner(hint)
+    return FIELD_CODECS.get(inner), optional
 
 
 def op_fields(cls: type) -> dict[str, tuple[FieldCodec, bool]]:
@@ -277,7 +244,7 @@ def parse_grid(raw: object, where: str) -> tuple[str, ...]:
     """A grid: a non-empty list of extent expressions over ``P`` (ints allowed)."""
     if not isinstance(raw, list) or not raw:
         raise ValueError(f"{where} must be a non-empty list of extents over {RANKS_SYMBOL}; got {raw!r}")
-    return tuple(parse_expr(extent, f"{where}[{g}]") for g, extent in enumerate(raw))
+    return tuple(check_index_expr(parse_expr(extent, f"{where}[{g}]"), f"{where}[{g}]") for g, extent in enumerate(raw))
 
 
 def parse_startup(raw: object, where: str) -> Startup:
@@ -289,7 +256,7 @@ def parse_startup(raw: object, where: str) -> Startup:
     unknown = sorted(set(raw) - {"load", "grid"})
     if unknown:
         raise ValueError(f"{where} has unknown field(s) {unknown}; it takes load and grid")
-    load = raw.get("load") or []
+    load = raw.get("load", [])
     if not isinstance(load, list) or not all(isinstance(name, str) and name for name in load):
         raise ValueError(f"{where}.load must be a list of library names; got {load!r}")
     grid = None if raw.get("grid") is None else parse_grid(raw["grid"], f"{where}.grid")

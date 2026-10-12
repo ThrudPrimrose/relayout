@@ -31,7 +31,8 @@ its submission envelope and hands it to relayout.
 | the JSON Schema | `relayout.requests.requests_schema()`, generated from the registry |
 
 Adding an operation is one dataclass registered with `@operation`: its fields, its checks
-(`validate`, at construction) and its effect (`apply`). Its JSON and its schema follow from the field
+(`validate`, at construction, after each field type's check in `relayout.ops.FIELD_CHECKS`) and its
+effect (`apply`). Its JSON and its schema follow from the field
 types.
 
 ## Startup
@@ -54,8 +55,8 @@ operation that cannot apply is a `ValueError` naming its entry (`operations[5] (
 | --- | --- | --- |
 | `cast` | `array`, `to` | the element type (`fp64` `fp32` `fp16` `bf16` `fp8_e4m3` `fp8_e5m2`) |
 | `format` | `array`, `to` | a sparse array's storage format (the caller checks the label) |
-| `zip` | `arrays`, `into` | fuses whole arrays of one shape into one array of structs, one member per array, each keeping its precision |
-| `unzip` | `array`, `into` | splits a whole struct array (a complex array is `(re, im)`) into one array per member, each keeping its member's precision |
+| `zip` | `arrays`, `into` | fuses whole arrays of one shape into one array of structs, one member per array, each keeping its precision; the arrays must be placed alike |
+| `unzip` | `array`, `into` | splits a whole struct array into one array per member, each keeping its member's precision and placement. A complex array is the native struct `(re, im)`: one element type to every other operation (a cast sets both parts), and still unzippable |
 | `block` | `array`, `digit`, `factor`, `into` | cuts `(d, s, e)` into coarse `(d, s·b, ⌈e/b⌉)` and fine `(d, s, b)`, in place |
 | `unblock` | `array`, `digits`, `factor`, `into` | merges a block's two digits |
 | `split` | `array`, `digit`, `parts`, `into` | cuts a whole dimension's digit into `parts` contiguous balanced bands: the band index and the index within the band |

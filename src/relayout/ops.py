@@ -22,12 +22,15 @@ import dataclasses
 import enum
 import math
 import operator
+import types
+import typing
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import ClassVar, NamedTuple, NewType, NoReturn
+from typing import Any, ClassVar, NamedTuple, NewType, NoReturn
 
 __all__ = [
     "DIM_DIGIT",
+    "FIELD_CHECKS",
     "GRID_SYMBOL",
     "OPERATIONS",
     "RANKS_SYMBOL",
@@ -87,6 +90,7 @@ __all__ = [
     "normal_split",
     "operation",
     "operations_for_axes",
+    "optional_inner",
     "run",
 ]
 
@@ -284,6 +288,68 @@ def is_reserved(name: str) -> bool:
     return name == RANKS_SYMBOL or (name[:1] == RANKS_SYMBOL and name[1:].isdigit())
 
 
+def check_name(name: str, where: str) -> None:
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"{where} must be a name; got {name!r}")
+
+
+def check_digit_name(name: str, where: str) -> None:
+    if not isinstance(name, str) or not name.isidentifier() or is_reserved(name):
+        raise ValueError(f"{where} must be a digit name (an identifier other than P, P0, P1, ...); got {name!r}")
+
+
+def check_distinct(names: Sequence[str], where: str, check: Callable[[str, str], None]) -> None:
+    for k, name in enumerate(names):
+        check(name, f"{where}[{k}]")
+    if len(set(names)) != len(names):
+        raise ValueError(f"{where} names one twice: {list(names)}")
+
+
+def check_array_names(names: Sequence[str], where: str) -> None:
+    if len(names) < len(("one", "two")):
+        raise ValueError(f"{where} must be a list of two or more names; got {list(names)}")
+    check_distinct(names, where, check_name)
+
+
+def check_digit_names(names: Sequence[str], where: str) -> None:
+    if not names:
+        raise ValueError(f"{where} must be a non-empty list of digit names")
+    check_distinct(names, where, check_digit_name)
+
+
+def check_digit_pair(names: Sequence[str], where: str) -> None:
+    if len(names) != len(("coarse", "fine")):
+        raise ValueError(f"{where} must name the two digits the cut leaves, coarse then fine; got {list(names)}")
+    check_distinct(names, where, check_digit_name)
+
+
+def check_index_exprs(texts: Sequence[str], where: str) -> None:
+    for k, text in enumerate(texts):
+        check_index_expr(text, f"{where}[{k}]")
+
+
+def optional_inner(hint: object) -> tuple[object, bool]:
+    """``hint`` without ``| None`` and whether it had it; ``NewType | None`` is a ``typing.Union`` before
+    Python 3.14 and a ``types.UnionType`` from it."""
+    if typing.get_origin(hint) in (typing.Union, types.UnionType) and type(None) in typing.get_args(hint):
+        (inner,) = (arg for arg in typing.get_args(hint) if arg is not type(None))
+        return inner, True
+    return hint, False
+
+
+#: Field type -> its check, run on every operation at construction (from Python or from JSON).
+FIELD_CHECKS: dict[object, Callable[[Any, str], object]] = {
+    ArrayName: check_name,
+    ArrayNames: check_array_names,
+    DigitName: check_digit_name,
+    DigitNames: check_digit_names,
+    DigitPair: check_digit_pair,
+    Expr: check_index_expr,
+    IndexExprs: check_index_exprs,
+    FormatLabel: check_name,
+}
+
+
 # ---- the operation registry ------------------------------------------------------------------------
 
 
@@ -318,10 +384,20 @@ class Operation:
     sparse: ClassVar[bool] = False
 
     def __post_init__(self) -> None:
+        values = dataclasses.asdict(self)  # type: ignore[call-overload]  # every operation is a dataclass
+        for spec in dataclasses.fields(self):  # type: ignore[arg-type]
+            value = values[spec.name]
+            hint, optional = optional_inner(spec.type)
+            if optional and value is None:
+                continue
+            check = FIELD_CHECKS.get(hint)
+            if check is not None:
+                check(value, spec.name)
         self.validate()
 
     def validate(self) -> None:
-        """Checks across fields, at construction (a request fault)."""
+        """Checks across fields, at construction (a request fault); each field's own check is
+        :data:`FIELD_CHECKS`'."""
 
     def apply(self, state: "State") -> None:
         raise NotImplementedError
@@ -399,6 +475,10 @@ class DigitTuple:
     def order(self) -> tuple[str, ...]:
         return tuple(digit.name for digit in self.digits)
 
+    def whole(self) -> bool:
+        """Whether every dimension is still its one uncut digit, in order (names aside)."""
+        return [digit.shape() for digit in self.digits] == [(d, 1, None, False) for d in range(self.ndim)]
+
     def find(self, name: str) -> int:
         for position, digit in enumerate(self.digits):
             if digit.name == name:
@@ -434,7 +514,12 @@ class DigitTuple:
     def merge(self, pair: tuple[str, str], into: str, *, band: bool) -> None:
         """Merge the coarse and fine digits ``pair`` of one dimension back into one digit ``into``."""
         coarse, fine = (self.digits[self.find(name)] for name in pair)
-        if coarse.dim != fine.dim or coarse.band != band:
+        adjacent = (
+            fine.stride == 1 and fine.extent is None and not fine.band
+            if band
+            else fine.extent is None or coarse.stride == fine.stride * fine.extent
+        )
+        if coarse.dim != fine.dim or coarse.band != band or not adjacent:
             raise ValueError(f"{self.where}: {list(pair)} are not the two digits of one {'split' if band else 'block'}")
         extent = None if band or coarse.extent is None or fine.extent is None else coarse.extent * fine.extent
         del self.digits[self.find(fine.name)]
@@ -502,18 +587,32 @@ class DigitTuple:
 @dataclass(frozen=True, slots=True)
 class ArraySpec:
     """A kernel array as a request's program starts from it: whole, on the host, row-major, at the
-    problem precision. ``members`` names a struct array's fields (a complex array is ``("re", "im")``)."""
+    problem precision. ``members`` names a struct array's fields; ``native`` marks a struct the kernel
+    also takes as one element type (a complex array is ``("re", "im")``, native): it is laid out and cast
+    like any array, and ``unzip`` still splits it into its members."""
 
     name: str
     ndim: int
     sparse: bool = False
     members: tuple[str, ...] = ()
+    native: bool = False
 
 
 class ArrayState:
     """One array while the program runs."""
 
-    __slots__ = ("digits", "format", "location", "members", "name", "precision", "replicated", "sparse", "touched")
+    __slots__ = (
+        "digits",
+        "format",
+        "location",
+        "members",
+        "name",
+        "native",
+        "precision",
+        "replicated",
+        "sparse",
+        "touched",
+    )
 
     def __init__(
         self,
@@ -527,6 +626,7 @@ class ArrayState:
         self.digits = DigitTuple(spec.ndim, grid, where)
         #: A struct's fields with their precisions (None = the problem precision).
         self.members = members or tuple((member, None) for member in spec.members)
+        self.native = spec.native
         self.precision: Precision | None = None
         self.format: str | None = None
         self.location: Location | None = None
@@ -559,7 +659,7 @@ class State:
     def digits(self, name: str, op: Operation) -> DigitTuple:
         """Array ``name``'s digit tuple, for a digit operation."""
         state = self.array(name, op)
-        if state.members:
+        if state.members and not state.native:
             raise ValueError(f"{self.where}: {name!r} is a struct; zip or unzip before laying it out")
         if state.replicated:
             raise ValueError(f"{self.where}: {name!r} is replicated; a replicated array keeps its layout")
@@ -638,9 +738,10 @@ class Cast(Operation):
 
     def apply(self, state: State) -> None:
         target = state.array(self.array, self)
-        if target.members:
+        if target.members and not target.native:
             raise ValueError(f"{state.where}: {self.array!r} is a struct; cast its fields before zipping them")
         target.precision = self.to
+        target.members = tuple((member, self.to) for member, _ in target.members)
 
 
 @operation
@@ -678,6 +779,9 @@ class Zip(Operation):
         ndims = {field.digits.ndim for field in fields}
         if len(ndims) != 1:
             raise ValueError(f"{state.where}: zipped arrays must have one shape; {list(self.arrays)} do not")
+        locations = {field.location for field in fields}
+        if len(locations) != 1:
+            raise ValueError(f"{state.where}: zipped arrays must be placed alike; {list(self.arrays)} are not")
         state.fresh(self.into)
         for name in self.arrays:
             del state.arrays[name]
@@ -685,6 +789,7 @@ class Zip(Operation):
         state.arrays[self.into] = ArrayState(
             spec, state.grid, state.where, tuple((field.name, field.precision) for field in fields)
         )
+        state.arrays[self.into].location = locations.pop()
 
 
 @operation
@@ -710,6 +815,7 @@ class Unzip(Operation):
             state.fresh(name)
             state.arrays[name] = ArrayState(ArraySpec(name, struct.digits.ndim), state.grid, state.where)
             state.arrays[name].precision = precision
+            state.arrays[name].location = struct.location
 
 
 class DigitOperation(Operation):
@@ -987,6 +1093,11 @@ class Replicate(Operation):
         target = state.array(self.array, self)
         if target.digits.distributed:
             raise ValueError(f"{state.where}: {self.array!r} is distributed; it cannot also be replicated")
+        if not target.digits.whole():
+            raise ValueError(
+                f"{state.where}: {self.array!r} is laid out ({list(target.digits.order())}); a replicated array "
+                "keeps its layout, so replicate it before any digit operation"
+            )
         target.replicated = True
         target.touched = True
 

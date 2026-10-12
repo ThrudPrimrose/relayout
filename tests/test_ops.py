@@ -132,6 +132,17 @@ def test_operations_see_what_the_previous_ones_left() -> None:
     assert state.arrays["x"].replicated
 
 
+def test_a_complex_array_is_one_element_and_a_struct() -> None:
+    """A native struct (complex) is laid out and cast like any array, and unzips into its members,
+    which keep its precision and placement."""
+    complex_z = [ArraySpec("Z", 1, members=("re", "im"), native=True)]
+    short = Distribute("Z", 0, dim=0, scheme=Scheme.BLOCK)
+    assert lowered([Cast("Z", Precision.FP32), short], complex_z, [2]) == {"Z": [AxisSplit(0, Scheme.BLOCK, 1)]}
+    ops = [Cast("Z", Precision.FP32), Place("Z", Location.DEVICE), Unzip("Z", ("Z_re", "Z_im"))]
+    state = run(ops, complex_z, None, "operations")
+    assert [(a.precision, a.location) for a in state.arrays.values()] == [(Precision.FP32, Location.DEVICE)] * 2
+
+
 def test_a_non_row_major_local_order_is_refused_with_the_permute_that_fixes_it() -> None:
     ops = [Block("A", "i0", "4", ("o", "f")), Permute("A", ("f", "o", "i1"))]
     expected = r'append \{"action": "permute", "array": "A", "order": \[\'o\', \'f\', \'i1\'\]\}'
@@ -157,6 +168,16 @@ def test_a_non_row_major_local_order_is_refused_with_the_permute_that_fixes_it()
         ([Distribute("A", 0, dim=0, scheme=Scheme.BLOCK), Replicate("A")], "cannot also be replicated"),
         ([Block("A", "i0", "2", ("o", "f")), Zip(("A", "B"), "W")], "regroups whole arrays"),
         ([Unzip("A", ("a", "b"))], "has 0 member"),
+        ([Block("A", "i0", "4", ("o", "f")), Replicate("A")], "replicate it before any digit operation"),
+        (
+            [Block("A", "i0", "8", ("a", "b")), Block("A", "b", "4", ("c", "d")), Unblock("A", ("a", "d"), "4", "x")],
+            "not the two digits of one block",
+        ),
+        (
+            [Split("A", "i0", "2", ("a", "b")), Block("A", "b", "4", ("c", "d")), Unsplit("A", ("a", "c"), "2", "x")],
+            "not the two digits of one split",
+        ),
+        ([Place("A", Location.DEVICE), Zip(("A", "B"), "W")], "placed alike"),
     ],
 )
 def test_an_operation_that_cannot_apply_is_refused_by_name(ops: list, match: str) -> None:
@@ -174,6 +195,10 @@ def test_an_operation_that_cannot_apply_is_refused_by_name(ops: list, match: str
         (lambda: Distribute("A", 0, dim=0, scheme=Scheme.BLOCK_CYCLIC), "block_size goes with"),
         (lambda: Shuffle("A", ("i0", "i1"), ("i0",), ("i0",)), "one expression per"),
         (lambda: LinearShuffle("A", ("i0",), (2,), ((1, 1), (1, 1))), "singular"),
+        (lambda: Zip(("A", "A"), "W"), "names one twice"),
+        (lambda: Block("A", "i0", "2", ("x",)), "two digits the cut leaves"),
+        (lambda: Block("A", "P0", "2", ("a", "b")), "other than P, P0"),
+        (lambda: Block("A", "i0", "2 ** P0", ("a", "b")), "uses Pow"),
     ],
 )
 def test_a_malformed_operation_is_refused_when_it_is_made(make, match: str) -> None:
@@ -251,6 +276,7 @@ if __name__ == "__main__":
     test_the_default_layout_raises_to_operations_that_lower_back(2)
     test_the_default_layout_raises_to_operations_that_lower_back(3)
     test_operations_see_what_the_previous_ones_left()
+    test_a_complex_array_is_one_element_and_a_struct()
     test_a_non_row_major_local_order_is_refused_with_the_permute_that_fixes_it()
     test_an_operation_that_cannot_apply_is_refused_by_name([Pad("A", "i0", "4")], "pad is not implemented yet")
     test_an_operation_that_cannot_apply_is_refused_by_name([Cast("Q", Precision.FP32)], "no array 'Q'")
