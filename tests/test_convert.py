@@ -42,6 +42,7 @@ def probes(source: np.dtype) -> np.ndarray:
     rng = np.random.default_rng(7)
     values = rng.standard_normal(4000) * np.exp2(rng.integers(-30, 20, 4000))
     edges = [0.0, -0.0, np.inf, -np.inf, np.nan, 448.0, 449.0, 464.0, 65504.0, 65519.9, 65520.0, 57344.0, 61440.0]
+    edges += [-0.0026474]  # a bfloat16 near-tie ml_dtypes rounds through float32
     for fmt in NARROW.values():
         info = ml_dtypes.finfo(fmt)
         grid = np.array([info.tiny, info.smallest_subnormal, float(info.max)], dtype=np.float64)
@@ -53,7 +54,7 @@ def probes(source: np.dtype) -> np.ndarray:
 
 
 @pytest.mark.parametrize("source", ["float64", "float32"])
-def test_every_narrow_format_rounds_once_like_numpy(source: str, tmp_path: pathlib.Path) -> None:
+def test_every_narrow_format_rounds_like_numpy(source: str, tmp_path: pathlib.Path) -> None:
     flat = IndexMap.identity(["n"])
     conversions = [Conversion(f"to_{name}", flat, source, name) for name in NARROW]
     lib = build(conversions, tmp_path)
@@ -129,7 +130,7 @@ def test_the_device_kernels_match_the_host(tmp_path: pathlib.Path) -> None:
 if __name__ == "__main__":
     for source in ("float64", "float32"):
         with tempfile.TemporaryDirectory() as tmp:
-            test_every_narrow_format_rounds_once_like_numpy(source, pathlib.Path(tmp))
+            test_every_narrow_format_rounds_like_numpy(source, pathlib.Path(tmp))
     with tempfile.TemporaryDirectory() as tmp:
         test_a_layout_and_a_cast_are_one_pass_both_ways(pathlib.Path(tmp))
     with tempfile.TemporaryDirectory() as tmp:

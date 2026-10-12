@@ -41,12 +41,15 @@ __all__ = [
 @dataclass(frozen=True, slots=True)
 class Element:
     """An element type by its numpy name: its C storage type, and for a format stored as bits its
-    ``(exponent bits, mantissa bits, finite-only)``; ``component`` names a complex type's part."""
+    ``(exponent bits, mantissa bits, finite-only)``; ``component`` names a complex type's part.
+    ``via_float`` rounds a double to float before the format, as ml_dtypes converts (numpy's float16
+    rounds a double once)."""
 
     name: str
     c_type: str
     bits: tuple[int, int, bool] | None = None
     component: str | None = None
+    via_float: bool = False
 
 
 ELEMENTS = {
@@ -55,9 +58,9 @@ ELEMENTS = {
         Element("float64", "double"),
         Element("float32", "float"),
         Element("float16", "uint16_t", (5, 10, False)),
-        Element("bfloat16", "uint16_t", (8, 7, False)),
-        Element("float8_e4m3fn", "uint8_t", (4, 3, True)),
-        Element("float8_e5m2", "uint8_t", (5, 2, False)),
+        Element("bfloat16", "uint16_t", (8, 7, False), via_float=True),
+        Element("float8_e4m3fn", "uint8_t", (4, 3, True), via_float=True),
+        Element("float8_e5m2", "uint8_t", (5, 2, False), via_float=True),
         Element("complex128", "relayout_c128", component="float64"),
         Element("complex64", "relayout_c64", component="float32"),
         Element("int64", "int64_t"),
@@ -93,7 +96,10 @@ def cast(source: Element, target: Element, value: str) -> str:
         return f"relayout_make_{target.c_type.removeprefix('relayout_')}({', '.join(parts)})"
     if target.bits is not None:
         ebits, mbits, finite = target.bits
-        return f"({target.c_type})relayout_narrow({as_double(source, value)}, {ebits}, {mbits}, {int(finite)})"
+        wide = as_double(source, value)
+        if target.via_float and source.name == "float64":
+            wide = f"(double)(float)({wide})"
+        return f"({target.c_type})relayout_narrow({wide}, {ebits}, {mbits}, {int(finite)})"
     if source.bits is not None:
         return f"({target.c_type})({as_double(source, value)})"
     return f"({target.c_type})({value})"

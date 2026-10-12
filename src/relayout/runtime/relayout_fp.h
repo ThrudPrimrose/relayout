@@ -2,8 +2,9 @@
  *
  * Element conversions for relayout's conversion kernels, one source for the host (C, OpenMP) and the
  * device (CUDA / HIP through NVRTC / hipRTC). Every narrow float format is stored as its bits and
- * converted from double in ONE rounding (round to nearest, ties to even), so a float64 -> bfloat16
- * cast is not rounded twice through float; widening is exact. Formats: IEEE-like (an exponent field of
+ * narrowed from a double in one rounding (round to nearest, ties to even); the caller rounds a double
+ * to float first where the reference does (ml_dtypes' bfloat16 and fp8, not numpy's float16). Widening
+ * is exact. Formats: IEEE-like (an exponent field of
  * all ones is Inf / NaN: float16, bfloat16, float8_e5m2) and finite-only (all ones in exponent AND
  * mantissa is the only NaN, overflow is NaN: float8_e4m3fn), as numpy and ml_dtypes define them.
  */

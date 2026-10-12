@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 import dace
+from conftest import variant
 from relayout.frontends.sdfg import LayoutError, apply_requests, relayout_array
 from relayout.layout import IndexMap
 from relayout.ops import ArraySpec, Block, Pad, Permute, Shuffle, run
@@ -44,6 +45,7 @@ def reference(a: np.ndarray) -> np.ndarray:
 )
 def test_laid_out_arguments_and_transients_compute_the_same(a_ops: list, b_ops: list, tmp_ops: list) -> None:
     sdfg = stencil.to_sdfg(simplify=True)
+    variant(sdfg, f"{len(a_ops)}_{len(b_ops)}_{len(tmp_ops)}")
     shape = ["N", "M"]
     relayout_array(sdfg, "A", layout(a_ops, shape))
     relayout_array(sdfg, "B", layout(b_ops, shape))
@@ -113,6 +115,7 @@ ROTATED = [Permute("A", ("i2", "i0", "i1"))]
 )
 def test_library_nodes_absorb_a_permutation(program: object, shapes: dict, layouts: dict, reference: object) -> None:
     sdfg = program.to_sdfg(simplify=True)  # type: ignore[attr-defined]
+    variant(sdfg, "laid")
     for name, ops in layouts.items():
         names = [str(s) for s in sdfg.arrays[name].shape]
         relayout_array(sdfg, name, layout(ops, names))

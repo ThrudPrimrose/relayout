@@ -25,3 +25,10 @@ def flang_missing() -> bool:
     from dace_fortran.llvm_toolchain import find_flang  # noqa: PLC0415  # optional extra
 
     return find_flang() is None
+
+
+def variant(sdfg: object, suffix: str) -> None:
+    """Name ``sdfg`` and every SDFG nested in it after one variant: dace keeps one library per build path
+    in a process, so a second variant of a program under the same name would run the first's library."""
+    for inner in sdfg.all_sdfgs_recursive():  # type: ignore[attr-defined]
+        inner.name = f"{inner.name}_{suffix}"

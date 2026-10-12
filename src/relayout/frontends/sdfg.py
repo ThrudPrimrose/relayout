@@ -30,7 +30,13 @@ from dace.libraries.blas.nodes.matmul import MatMul
 from dace.libraries.linalg import TensorDot, TensorTranspose
 from dace.libraries.mpi.nodes import Irecv, Wait, Waitall
 from dace.libraries.mpi.nodes.node import MPINode
+from dace.libraries.standard.nodes.copy import CopyLibraryNode
 from dace.properties import CodeBlock
+from dace.transformation.interstate.expand_nested_sdfg_inputs import ExpandNestedSDFGInputs
+from dace.transformation.passes.canonicalize.pipeline import canonicalize
+from dace.transformation.passes.canonicalize.untile_loops import UntileLoops
+from dace.transformation.passes.insert_explicit_copies import InsertExplicitCopies
+from dace.transformation.passes.remove_views import RemoveViews
 from dace.sdfg import propagation
 from dace.sdfg.graph import MultiConnectorEdge
 from dace.sdfg.state import SDFGState
@@ -39,7 +45,15 @@ from relayout.layout import IndexMap
 from relayout.ops import ArraySpec, Cast, DigitOperation, Requests
 from relayout.rules import einsum_operand, flips_transpose, transpose_axes
 
-__all__ = ["LayoutError", "apply_requests", "laid_name", "physical_subset", "relayout_array", "rewrite_subscripts"]
+__all__ = [
+    "LayoutError",
+    "apply_requests",
+    "laid_name",
+    "physical_subset",
+    "prepare",
+    "relayout_array",
+    "rewrite_subscripts",
+]
 
 #: The prefix of the transient an argument is laid out into.
 LAID = "laid_"
@@ -55,6 +69,23 @@ def laid_name(name: str) -> str:
 
 #: A dace symbolic value: a sympy expression or a plain int.
 type Symbolic = sympy.Expr | int
+
+
+def prepare(sdfg: dace.SDFG, target: str = "cpu") -> dace.SDFG:
+    """``sdfg`` in the form the rewrite reads best, in place: tiled loops and blocked arrays untiled,
+    canonicalized (loops become maps), nested SDFGs receiving whole arrays, no views but those a
+    library node reads, implicit copies explicit; a non-packed array is refused."""
+    UntileLoops(unblock_arrays=True).apply_pass(sdfg, {})
+    canonicalize(sdfg, target=target, validate=True)
+    sdfg.apply_transformations_repeated(ExpandNestedSDFGInputs)
+    RemoveViews().apply_pass(sdfg, {})
+    InsertExplicitCopies().apply_pass(sdfg, {})
+    for _, name, desc in sdfg.arrays_recursive():
+        if isinstance(desc, data.Array) and not isinstance(desc, (data.View, data.ContainerArray)):
+            if not (desc.is_packed_c_strides() or desc.is_packed_fortran_strides()):
+                raise LayoutError(f"{name!r} has strides {desc.strides} over {desc.shape}; lay out packed arrays only")
+    sdfg.validate()
+    return sdfg
 
 
 def expr(text: str) -> sympy.Expr:
@@ -169,6 +200,9 @@ def rewrite_accesses(sdfg: dace.SDFG, name: str, new_name: str, layout: IndexMap
         rewrite_accesses(inner_sdfg, inner, inner, inner_layout)
         inner_sdfg.arrays[inner] = laid_out_descriptor(inner_desc, inner_layout, inner_desc.transient)
     for state in sdfg.states():
+        for copy_node in [n for n in state.nodes() if isinstance(n, CopyLibraryNode)]:
+            if any(e.data.data == name for e in state.all_edges(copy_node)):
+                expand_copy(state, copy_node)
         for node in state.data_nodes():
             if node.data == name:
                 node.data = new_name
@@ -317,6 +351,40 @@ def library_rule(state: SDFGState, edge: MultiConnectorEdge[dace.Memlet], layout
             rule(state, node, connector, perm)
 
 
+def expand_copy(state: SDFGState, node: CopyLibraryNode) -> None:
+    """A copy as a map of point copies over its box, so each side follows its own layout; the box's
+    varying dimensions pair up in order, and a reduction (``wcr``) on the target stays."""
+    source = next(e for e in state.in_edges(node) if e.dst_conn == CopyLibraryNode.INPUT_CONNECTOR_NAME)
+    target = next(e for e in state.out_edges(node) if e.src_conn == CopyLibraryNode.OUTPUT_CONNECTOR_NAME)
+    boxes = [as_range(e.data.subset) for e in (source, target)]
+    varying = [[d for d, (b, e, _) in enumerate(box.ranges) if not symbolic.equal_valued(b, e)] for box in boxes]
+    sizes = [[box.size()[d] for d in dims] for box, dims in zip(boxes, varying, strict=True)]
+    if len(sizes[0]) != len(sizes[1]) or not all(symbolic.equal_valued(a, b) for a, b in zip(*sizes, strict=True)):
+        raise LayoutError(
+            f"{state.label}: copy {node.label!r} reshapes {boxes[0]} into {boxes[1]}; lay out a plain copy"
+        )
+    params = [f"__c{k}" for k in range(len(sizes[0]))]
+
+    def point(box: subsets.Range, dims: list[int]) -> str:
+        index = [str(begin) for begin, _, _ in box.ranges]
+        for param, dim in zip(params, dims, strict=True):
+            index[dim] = f"{index[dim]} + {param}"
+        return ", ".join(index)
+
+    src, dst = source.data.data, target.data.data
+    state.add_mapped_tasklet(
+        f"{node.label}_points",
+        {p: f"0:{size}" for p, size in zip(params, sizes[0], strict=True)} or {"__c": "0:1"},
+        {"__inp": dace.Memlet(f"{src}[{point(boxes[0], varying[0])}]")},
+        "__out = __inp",
+        {"__out": dace.Memlet(f"{dst}[{point(boxes[1], varying[1])}]", wcr=target.data.wcr)},
+        input_nodes={src: source.src},
+        output_nodes={dst: target.dst},
+        external_edges=True,
+    )
+    state.remove_node(node)
+
+
 def mpi_buffer(edge: MultiConnectorEdge[dace.Memlet]) -> bool:
     """Whether ``edge`` is an MPI library node's buffer (``_buffer``, ``_inbuffer``, ``_out_buffer``, ...)."""
     for node, connector in ((edge.dst, edge.dst_conn), (edge.src, edge.src_conn)):
@@ -453,7 +521,14 @@ def conversion(state: SDFGState, logical: str, laid: str, layout: IndexMap, inwa
 
 
 def is_read(sdfg: dace.SDFG, name: str) -> bool:
-    return any(n.data == name and s.out_degree(n) > 0 for s in sdfg.states() for n in s.data_nodes())
+    """Whether ``sdfg`` reads ``name``: an access node it leaves, or a reduction (``wcr``) into it, which
+    reads what it accumulates onto (the reduction's memlet sits on the edge inside the scope)."""
+    for state in sdfg.states():
+        if any(n.data == name and state.out_degree(n) > 0 for n in state.data_nodes()):
+            return True
+        if any(e.data.data == name and e.data.wcr is not None for e in state.edges()):
+            return True
+    return False
 
 
 def is_written(sdfg: dace.SDFG, name: str) -> bool:

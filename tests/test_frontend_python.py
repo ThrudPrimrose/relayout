@@ -25,7 +25,7 @@ def layout(ops: list, shape: tuple[str, ...]) -> IndexMap:
 def rewritten(function: Callable[..., None], layouts: dict[str, IndexMap]) -> Callable[..., None]:
     """``function`` compiled from its rewritten source."""
     tree = rewrite(ast.parse(textwrap.dedent(inspect.getsource(function))), layouts)
-    namespace: dict[str, object] = {"np": np}
+    namespace = dict(function.__globals__)  # the rewritten function sees its module, as the original does
     exec(compile(tree, "<rewritten>", "exec"), namespace)  # the test's own kernel
     rebuilt = namespace[function.__name__]
     assert callable(rebuilt)
