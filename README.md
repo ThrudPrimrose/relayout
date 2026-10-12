@@ -14,9 +14,10 @@ Fortran tests need LLVM `flang` on PATH.
 
 ## Layout
 
-- `src/relayout/ops.py` layout op sequences: the op registry and JSON schema, inverses, and the lowering
-  to one split per dimension. hpcagent-bench's `requests.layout` is this schema; adding an op is one
-  registered class.
+- `src/relayout/ops.py` layout op sequences over named digits, the processor grid as expressions over
+  the rank count, inverses, and the lowering to one split per dimension ([docs/layout.md](docs/layout.md)).
+  hpcagent-bench's `requests.grid` and `requests.layout` are this schema; adding an op is one registered
+  class.
 - `src/relayout/kernels/omen_sse/` OMEN scattering self-energy (SC19 Gordon Bell), Python and Fortran,
   single node and MPI (G energy-distributed in, Sigma momentum-distributed out, one Alltoall).
   `reference()` is the closed form the SC19 transformation sequence ends at.
