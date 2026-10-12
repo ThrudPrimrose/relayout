@@ -19,7 +19,9 @@ def test_transpose_einsum_tensordot_and_sum_absorb_a_permutation(perm: tuple[int
     for axes in PERMS:
         np.testing.assert_array_equal(stored.transpose(transpose_axes(axes, perm)), X.transpose(axes))
     w = np.arange(12.0).reshape(3, 4)
-    np.testing.assert_array_equal(np.einsum(f"{einsum_operand('ijk', perm)},jk->i", stored, w), np.einsum("ijk,jk->i", X, w))
+    np.testing.assert_array_equal(
+        np.einsum(f"{einsum_operand('ijk', perm)},jk->i", stored, w), np.einsum("ijk,jk->i", X, w)
+    )
     np.testing.assert_array_equal(
         np.tensordot(stored, w, axes=(contracted_axes((1, 2), perm), (0, 1))), np.tensordot(X, w, axes=((1, 2), (0, 1)))
     )
