@@ -21,10 +21,11 @@ before emitting C, so the rewrite there runs on element accesses only.
 
 import ast
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from relayout.layout import IndexMap
 
-__all__ = ["MPI_BUFFERS", "LayoutError", "rewrite"]
+__all__ = ["MPI_BUFFERS", "LayoutError", "Regroup", "Split", "Zipped", "rewrite"]
 
 
 class LayoutError(ValueError):
@@ -173,6 +174,82 @@ class Rewriter(ast.NodeTransformer):
         return ast.Name(packed, ast.Load())
 
 
+@dataclass(frozen=True, slots=True)
+class Zipped:
+    """An array zipped into ``into`` at ``index`` of its last (field) dimension."""
+
+    into: str
+    index: int
+
+
+@dataclass(frozen=True, slots=True)
+class Split:
+    """An array split along ``dim`` into ``parts``, one array per index."""
+
+    parts: tuple[str, ...]
+    dim: int
+
+
+class Regroup(ast.NodeTransformer):
+    """``zip`` / ``unzip`` on the program: a zipped array's accesses address its field of the zipped
+    array (``A[i, j]`` -> ``Z[i, j, k]``, a whole use the view ``Z[..., k]``), a split array's address the
+    part their constant index names (``W[i, c]`` -> ``W_c[i]``), and the function takes the new arrays."""
+
+    def __init__(self, zipped: Mapping[str, Zipped], split: Mapping[str, Split]) -> None:
+        self.zipped = zipped
+        self.split = split
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
+        params: list[ast.arg] = []
+        for arg in node.args.args:
+            if arg.arg in self.zipped:
+                into = self.zipped[arg.arg].into
+                if all(p.arg != into for p in params):
+                    params.append(ast.arg(into))
+            elif arg.arg in self.split:
+                params += [ast.arg(part) for part in self.split[arg.arg].parts]
+            else:
+                params.append(arg)
+        node.args.args = params
+        return self.generic_visit(node)
+
+    def visit_Subscript(self, node: ast.Subscript) -> ast.AST:
+        name = node.value.id if isinstance(node.value, ast.Name) else None
+        elements = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+        elements = [self.visit(e) for e in elements]
+        if name in self.zipped:
+            field = self.zipped[name]
+            index = ast.Tuple([*elements, ast.Constant(field.index)], ast.Load())
+            return ast.Subscript(ast.Name(field.into, ast.Load()), index, node.ctx)
+        if name in self.split:
+            split = self.split[name]
+            if split.dim >= len(elements) or not isinstance(elements[split.dim], ast.Constant):
+                raise LayoutError(
+                    f"{where(node)}: {name!r} is split along dimension {split.dim}; index it by a constant"
+                )
+            constant = elements.pop(split.dim)
+            part = split.parts[int(constant.value)]  # type: ignore[union-attr]
+            return ast.Subscript(
+                ast.Name(part, ast.Load()), ast.Tuple(elements or [ast.Constant(0)], ast.Load()), node.ctx
+            )
+        return self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+        if isinstance(node.value, ast.Name) and node.value.id in self.zipped and node.attr == "shape":
+            return parse(f"{self.zipped[node.value.id].into}.shape[:-1]")
+        return self.generic_visit(node)
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        if node.id in self.zipped and isinstance(node.ctx, ast.Load):
+            field = self.zipped[node.id]
+            return parse(f"{field.into}[..., {field.index}]")
+        if node.id in self.split:
+            raise LayoutError(
+                f"{where(node)}: {node.id!r} is split into {list(self.split[node.id].parts)}; use it by element"
+            )
+        return node
+
+
 def imports_numpy(tree: ast.Module) -> bool:
     return any(
         isinstance(node, ast.Import) and any(alias.name == "numpy" and alias.asname == "np" for alias in node.names)
@@ -180,9 +257,17 @@ def imports_numpy(tree: ast.Module) -> bool:
     )
 
 
-def rewrite(tree: ast.Module, layouts: Mapping[str, IndexMap]) -> ast.Module:
-    """``tree`` running on the laid-out buffers of ``layouts`` (see the module docstring); the input tree
-    is rewritten in place and returned, locations fixed."""
+def rewrite(
+    tree: ast.Module,
+    layouts: Mapping[str, IndexMap],
+    zipped: Mapping[str, Zipped] | None = None,
+    split: Mapping[str, Split] | None = None,
+) -> ast.Module:
+    """``tree`` running on the laid-out buffers of ``layouts`` (see the module docstring), after the
+    arrays of ``zipped`` / ``split`` are regrouped (:class:`Regroup`; a layout then names the new
+    arrays); the input tree is rewritten in place and returned, locations fixed."""
+    if zipped or split:
+        tree = Regroup(zipped or {}, split or {}).visit(tree)
     rewriter = Rewriter(layouts)
     tree.body = rewriter.statements(tree.body)
     if rewriter.uses_numpy and not imports_numpy(tree):

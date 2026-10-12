@@ -57,8 +57,6 @@ def test_a_reduction_into_zipped_fields_keeps_accumulating() -> None:
     np.testing.assert_allclose(acc1, 1 + 2 * KRED * x)
 
 
-
-
 NCLV = 3
 
 

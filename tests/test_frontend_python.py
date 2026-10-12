@@ -13,7 +13,7 @@ import pytest
 
 from conftest import mpi_or_skip
 from relayout.convert import from_layout, to_layout
-from relayout.frontends.python import LayoutError, rewrite
+from relayout.frontends.python import LayoutError, Split, Zipped, rewrite
 from relayout.layout import IndexMap
 from relayout.ops import ArraySpec, Block, Pad, Permute, Shuffle, run
 
@@ -22,9 +22,9 @@ def layout(ops: list, shape: tuple[str, ...]) -> IndexMap:
     return run(ops, [ArraySpec("A", len(shape))], (), "operations").layout("A", list(shape))
 
 
-def rewritten(function: Callable[..., None], layouts: dict[str, IndexMap]) -> Callable[..., None]:
+def rewritten(function: Callable[..., None], layouts: dict[str, IndexMap], **regroup: object) -> Callable[..., None]:
     """``function`` compiled from its rewritten source."""
-    tree = rewrite(ast.parse(textwrap.dedent(inspect.getsource(function))), layouts)
+    tree = rewrite(ast.parse(textwrap.dedent(inspect.getsource(function))), layouts, **regroup)  # type: ignore[arg-type]
     namespace = dict(function.__globals__)  # the rewritten function sees its module, as the original does
     exec(compile(tree, "<rewritten>", "exec"), namespace)  # the test's own kernel
     rebuilt = namespace[function.__name__]
@@ -72,6 +72,34 @@ def test_a_cut_array_used_whole_is_refused_by_its_line() -> None:
         rewritten(whole, {"A": cut})
 
 
+def axpy3(x: np.ndarray, y: np.ndarray, out: np.ndarray, N: int) -> None:  # noqa: N803
+    for i in range(N):
+        out[i] = x[i] + 2.0 * y[i]
+
+
+def test_zipped_and_split_arrays_follow_their_new_arrays() -> None:
+    """Zip x and y into p (then SoA by a permutation); split q along its species dimension."""
+    rng = np.random.default_rng(4)
+    x, y = rng.random(6), rng.random(6)
+    expected = x + 2.0 * y
+    soa = layout([Permute("A", ("i1", "i0"))], ("N", "2"))
+    zipped = {"x": Zipped("p", 0), "y": Zipped("p", 1)}
+    p = to_layout(np.stack([x, y], axis=-1), soa, {"N": 6})
+    out = np.zeros(6)
+    rewritten(axpy3, {"p": soa}, zipped=zipped)(p, out, N=6)
+    np.testing.assert_allclose(out, expected)
+    split = {"out": Split(("out_a", "out_b"), 0)}
+
+    def two_rows(out: np.ndarray, N: int) -> None:  # noqa: N803
+        for i in range(N):
+            out[0, i] = i
+            out[1, i] = 2 * i
+
+    out_a, out_b = np.zeros(4), np.zeros(4)
+    rewritten(two_rows, {}, split=split)(out_a, out_b, N=4)
+    np.testing.assert_array_equal(out_b, 2 * np.arange(4.0))
+
+
 def exchange(comm: Any, A: np.ndarray) -> None:  # an mpi4py communicator
     comm.Sendrecv(A[0, :], dest=0, recvbuf=A[2, :], source=0)
 
@@ -93,6 +121,7 @@ if __name__ == "__main__":
     test_element_accesses_follow_any_layout()
     test_whole_array_uses_go_through_the_logical_view()
     test_a_cut_array_used_whole_is_refused_by_its_line()
+    test_zipped_and_split_arrays_follow_their_new_arrays()
     try:
         test_mpi_buffers_are_packed_and_unpacked()
     except pytest.skip.Exception as skipped:
