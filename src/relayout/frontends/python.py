@@ -214,7 +214,7 @@ class Regroup(ast.NodeTransformer):
         return self.generic_visit(node)
 
     def visit_Subscript(self, node: ast.Subscript) -> ast.AST:
-        name = node.value.id if isinstance(node.value, ast.Name) else None
+        name = node.value.id if isinstance(node.value, ast.Name) else ""
         elements = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
         elements = [self.visit(e) for e in elements]
         if name in self.zipped:
