@@ -4,7 +4,6 @@ layouts cell for cell, both directions, built with the host C compiler (``$CC``,
 device kernels when cupy has a GPU."""
 
 import ctypes
-import importlib.util
 import itertools
 import os
 import pathlib
@@ -135,6 +134,8 @@ if __name__ == "__main__":
         test_a_layout_and_a_cast_are_one_pass_both_ways(pathlib.Path(tmp))
     with tempfile.TemporaryDirectory() as tmp:
         test_complex_arrays_cast_their_parts(pathlib.Path(tmp))
-    if importlib.util.find_spec("cupy") is not None:
-        with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
             test_the_device_kernels_match_the_host(pathlib.Path(tmp))
+        except pytest.skip.Exception as skipped:
+            print(f"skipped: {skipped}")

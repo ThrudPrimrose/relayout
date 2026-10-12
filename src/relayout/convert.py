@@ -14,9 +14,13 @@ conversions are ``runtime/relayout_fp.h``. A kernel takes the symbols of the log
 import ast
 import pathlib
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+import numpy as np
+import numpy.typing as npt
+
+from relayout.expr import eval_index, evaluate
 from relayout.layout import IndexMap, linear
 
 __all__ = [
@@ -28,7 +32,9 @@ __all__ = [
     "compile_host",
     "device_source",
     "fp_header",
+    "from_layout",
     "host_source",
+    "to_layout",
 ]
 
 
@@ -272,4 +278,49 @@ def compile_host(source: str, out: pathlib.Path, compiler: str = "cc", flags: Se
     c_file.write_text(source, encoding="utf-8")
     argv = [compiler, *flags, "-fopenmp", "-fPIC", "-shared", "-o", str(out), str(c_file)]
     subprocess.run(argv, check=True, capture_output=True)
+    return out
+
+
+#: The calls of a layout's expressions over numpy arrays.
+NUMPY_CALLS = {"min": np.minimum, "max": np.maximum}
+
+
+def placement(
+    layout: IndexMap, sizes: Mapping[str, int]
+) -> tuple[tuple[npt.NDArray[np.int64], ...], npt.NDArray[np.bool_]]:
+    """For every cell of the laid-out buffer (``sizes`` binding the shape's symbols): the logical index
+    it holds, one array per dimension, and whether it is live."""
+    extents = [eval_index(extent, sizes, "extents") for extent in layout.extents()]
+    grid = np.indices(extents, dtype=np.int64)
+    positions = [f"p{k}" for k in range(len(extents))]
+    names = {**sizes, **dict(zip(positions, grid, strict=True))}
+
+    def array(expr: str) -> npt.NDArray[np.int64]:
+        return np.broadcast_to(evaluate(expr, names, NUMPY_CALLS, "layout"), extents)
+
+    live = np.ones(extents, dtype=bool)
+    for condition in layout.live(positions):
+        live &= array(condition)
+    return tuple(array(expr) for expr in layout.logical(positions)), live
+
+
+def to_layout(
+    logical: npt.NDArray[np.generic], layout: IndexMap, sizes: Mapping[str, int], dtype: npt.DTypeLike = None
+) -> npt.NDArray[np.generic]:
+    """The laid-out buffer of ``logical`` at ``dtype`` (default: its own), zero in dead cells: the numpy
+    form of the ``relayout_in`` kernel."""
+    index, live = placement(layout, sizes)
+    out = np.zeros(live.shape, dtype=logical.dtype if dtype is None else dtype)
+    out[live] = logical[tuple(axis[live] for axis in index)]
+    return out
+
+
+def from_layout(
+    stored: npt.NDArray[np.generic], layout: IndexMap, sizes: Mapping[str, int], dtype: npt.DTypeLike = None
+) -> npt.NDArray[np.generic]:
+    """The logical array ``stored`` holds at ``dtype``: the numpy form of the ``relayout_out`` kernel."""
+    index, live = placement(layout, sizes)
+    shape = tuple(eval_index(extent, sizes, "shape") for extent in layout.shape)
+    out = np.zeros(shape, dtype=stored.dtype if dtype is None else dtype)
+    out[tuple(axis[live] for axis in index)] = stored[live]
     return out

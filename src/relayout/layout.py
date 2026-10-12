@@ -198,6 +198,18 @@ class IndexMap:
             return None
         return tuple(axis.dim for axis in self.axes)
 
+    def view(self) -> tuple[tuple[str | None, ...], tuple[int, ...]] | None:
+        """How the laid-out buffer reads as the logical array without a copy, or None when it cannot
+        (a cut or a renumbering): per physical axis the live extent to slice a padded one to (None =
+        whole), then the physical axis of each logical dimension (a transpose)."""
+        if self.renumbers or len(self.axes) != len(self.shape):
+            return None
+        if any(axis.stride != 1 or axis.live is not None for axis in self.axes):
+            return None
+        live = tuple(self.shape[axis.dim] if axis.pad else None for axis in self.axes)
+        order = tuple(next(k for k, axis in enumerate(self.axes) if axis.dim == dim) for dim in range(len(self.shape)))
+        return live, order
+
     def is_identity(self) -> bool:
         return self.permutation() == tuple(range(len(self.shape)))
 

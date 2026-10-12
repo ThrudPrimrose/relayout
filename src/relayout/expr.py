@@ -6,8 +6,9 @@ non-negative integers, so ``//`` and ``%`` are also C's ``/`` and ``%``."""
 import ast
 import operator
 from collections.abc import Callable, Mapping
+from typing import Any
 
-__all__ = ["BINOP_FUNCTIONS", "INDEX_CALLS", "check_index_expr", "eval_index", "int_root"]
+__all__ = ["BINOP_FUNCTIONS", "INDEX_CALLS", "check_index_expr", "eval_index", "evaluate", "int_root"]
 
 #: The operators an index expression may use: integer arithmetic, floor and mod, and the bitwise ones
 #: XOR swizzles need.
@@ -72,11 +73,11 @@ def check_index_expr(text: str, where: str) -> str:
     return text
 
 
-def eval_index(text: str, names: Mapping[str, int], where: str) -> int:
-    """The value of the index expression ``text`` (:func:`check_index_expr`'s form) with ``names`` bound;
-    ``//`` and ``%`` floor like Python's."""
+def evaluate(text: str, names: Mapping[str, Any], calls: Mapping[str, Callable[..., Any]], where: str) -> Any:
+    """``text`` over ``names``, each an int or a numpy array (evaluated elementwise), with ``calls`` for
+    ``min`` / ``max`` / ``root``; a ``<`` comparison (a layout's live condition) is allowed too."""
 
-    def value(node: ast.expr) -> int:
+    def value(node: ast.expr) -> Any:
         if isinstance(node, ast.Constant) and isinstance(node.value, int):
             return node.value
         if isinstance(node, ast.Name):
@@ -87,8 +88,17 @@ def eval_index(text: str, names: Mapping[str, int], where: str) -> int:
             return -value(node.operand)
         if isinstance(node, ast.BinOp) and type(node.op) in BINOP_FUNCTIONS:
             return BINOP_FUNCTIONS[type(node.op)](value(node.left), value(node.right))
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in INDEX_CALLS:
-            return INDEX_CALLS[node.func.id][1](*(value(arg) for arg in node.args))
+        if isinstance(node, ast.Compare) and len(node.ops) == 1 and isinstance(node.ops[0], ast.Lt):
+            return value(node.left) < value(node.comparators[0])
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in calls:
+            return calls[node.func.id](*(value(arg) for arg in node.args))
         raise ValueError(f"{where}: {text!r} is not an index expression")
 
-    return value(ast.parse(check_index_expr(text, where), mode="eval").body)
+    return value(ast.parse(text, mode="eval").body)
+
+
+def eval_index(text: str, names: Mapping[str, int], where: str) -> int:
+    """The value of the index expression ``text`` (:func:`check_index_expr`'s form) with ``names`` bound;
+    ``//`` and ``%`` floor like Python's."""
+    calls = {name: function for name, (_, function) in INDEX_CALLS.items()}
+    return int(evaluate(check_index_expr(text, where), names, calls, where))
