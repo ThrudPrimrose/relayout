@@ -28,6 +28,8 @@ from dace.libraries.blas.nodes.einsum import Einsum
 from dace.libraries.blas.nodes.gemm import Gemm
 from dace.libraries.blas.nodes.matmul import MatMul
 from dace.libraries.linalg import TensorDot, TensorTranspose
+from dace.libraries.mpi.nodes import Irecv, Wait, Waitall
+from dace.libraries.mpi.nodes.node import MPINode
 from dace.properties import CodeBlock
 from dace.sdfg import propagation
 from dace.sdfg.graph import MultiConnectorEdge
@@ -168,7 +170,9 @@ def rewrite_accesses(sdfg: dace.SDFG, name: str, new_name: str, layout: IndexMap
             memlet = edge.data
             if memlet.is_empty():
                 continue
-            if memlet.data == name:
+            if memlet.data == name and mpi_buffer(edge) and not in_order(memlet.subset, layout):
+                packed_transfer(sdfg, state, edge, new_name, layout)
+            elif memlet.data == name:
                 memlet.data = new_name
                 memlet.subset = physical_subset(memlet.subset, layout)
                 library_rule(state, edge, layout)
@@ -176,7 +180,9 @@ def rewrite_accesses(sdfg: dace.SDFG, name: str, new_name: str, layout: IndexMap
                 memlet.other_subset = physical_subset(memlet.other_subset, layout)
     for edge in sdfg.all_interstate_edges():
         assignments = edge.data.assignments
-        edge.data.assignments = {k: rewrite_subscripts(v, name, new_name, layout.physical) for k, v in assignments.items()}
+        edge.data.assignments = {
+            k: rewrite_subscripts(v, name, new_name, layout.physical) for k, v in assignments.items()
+        }
         condition = edge.data.condition.as_string
         if name in condition:
             edge.data.condition = CodeBlock(rewrite_subscripts(condition, name, new_name, layout.physical))
@@ -281,13 +287,131 @@ def library_rule(state: SDFGState, edge: MultiConnectorEdge[dace.Memlet], layout
             rule(state, node, connector, perm)
 
 
+def mpi_buffer(edge: MultiConnectorEdge[dace.Memlet]) -> bool:
+    """Whether ``edge`` is an MPI library node's buffer (``_buffer``, ``_inbuffer``, ``_out_buffer``, ...)."""
+    for node, connector in ((edge.dst, edge.dst_conn), (edge.src, edge.src_conn)):
+        if isinstance(node, MPINode):
+            return connector is not None and connector.endswith("buffer")
+    return False
+
+
+def in_order(subset: subsets.Subset | None, layout: IndexMap) -> bool:
+    """Whether the laid-out cells of the logical box ``subset`` are one contiguous run in the box's own
+    (row-major) order, so a transfer can use them as they are: a permuted or padded layout whose
+    varying axes keep their order and are whole after the first; a cut never (unless a point)."""
+    ranges = list(as_range(subset).ranges)
+    view = layout.view()
+    if view is None:
+        return all(symbolic.equal_valued(begin, end) for begin, end, _ in ranges)
+    extents = [expr(extent) for extent in layout.extents()]
+    physical = [ranges[axis.dim] for axis in layout.axes]
+    varying = [k for k, (begin, end, _) in enumerate(physical) if not symbolic.equal_valued(begin, end)]
+    if not varying:
+        return True
+    dims = [layout.axes[k].dim for k in varying]
+    whole = all(
+        symbolic.equal_valued(physical[k][0], 0) and symbolic.equal_valued(physical[k][1], extents[k] - 1)
+        for k in range(varying[0] + 1, len(physical))
+    )
+    return dims == sorted(dims) and whole
+
+
+def wait_state(sdfg: dace.SDFG, state: SDFGState, node: nodes.LibraryNode) -> SDFGState:
+    """The state holding the ``Wait`` of a non-blocking receive's request."""
+    request = next((e.data.data for e in state.out_edges(node) if e.src_conn == "_request"), None)
+    for candidate in sdfg.states():
+        for wait in candidate.nodes():
+            if isinstance(wait, (Wait, Waitall)) and any(
+                e.data.data == request for e in candidate.in_edges(wait) if e.dst_conn == "_request"
+            ):
+                return candidate
+    raise LayoutError(f"{state.label}: no Wait for the request of {node.label!r}; its unpack has no place")
+
+
+def packed_transfer(
+    sdfg: dace.SDFG, state: SDFGState, edge: MultiConnectorEdge[dace.Memlet], laid: str, layout: IndexMap
+) -> None:
+    """An MPI buffer of a laid-out array moved through a contiguous transient in logical order: packed
+    from the laid-out cells before a send, unpacked into them after a receive (at the wait of an
+    ``Irecv``). The wire order is the logical one, as the program had it before the layout."""
+    box = as_range(edge.data.subset)
+    sizes, first = box.size(), box.min_element()
+    desc = sdfg.arrays[laid]
+    packed, _ = sdfg.add_transient(
+        f"packed_{laid}",
+        sizes,
+        desc.dtype,
+        desc.storage,
+        lifetime=dace.dtypes.AllocationLifetime.SDFG,
+        find_new_name=True,
+    )
+    params = [f"__j{k}" for k in range(len(sizes))]
+    ranges = {p: f"0:{size}" for p, size in zip(params, sizes, strict=True)}
+    position = layout.physical([f"{low} + {p}" for low, p in zip(first, params, strict=True)])
+    laid_memlet = dace.Memlet(f"{laid}[{', '.join(position)}]")
+    packed_memlet = dace.Memlet(f"{packed}[{', '.join(params)}]")
+    whole = dace.Memlet.from_array(packed, sdfg.arrays[packed])
+    sending = isinstance(edge.dst, nodes.LibraryNode)
+    state.remove_edge(edge)
+    if sending:
+        source = edge.src
+        if isinstance(source, nodes.AccessNode):
+            source.data = laid
+        packed_node = state.add_access(packed)
+        state.add_mapped_tasklet(
+            f"pack_{packed}",
+            ranges,
+            {"__inp": laid_memlet},
+            "__out = __inp",
+            {"__out": packed_memlet},
+            input_nodes={laid: source},
+            output_nodes={packed: packed_node},
+            external_edges=True,
+        )
+        state.add_edge(packed_node, None, edge.dst, edge.dst_conn, whole)
+        return
+    packed_node = state.add_access(packed)
+    state.add_edge(edge.src, edge.src_conn, packed_node, None, whole)
+    if isinstance(edge.src, Irecv):
+        if state.degree(edge.dst) == 0:
+            state.remove_node(edge.dst)
+        after = wait_state(sdfg, state, edge.src)
+        target = after.parent_graph.add_state_after(after, f"unpack_{packed}")
+        target.add_mapped_tasklet(
+            f"unpack_{packed}",
+            ranges,
+            {"__inp": packed_memlet},
+            "__out = __inp",
+            {"__out": laid_memlet},
+            external_edges=True,
+        )
+        return
+    destination = edge.dst
+    if isinstance(destination, nodes.AccessNode):
+        destination.data = laid
+    state.add_mapped_tasklet(
+        f"unpack_{packed}",
+        ranges,
+        {"__inp": packed_memlet},
+        "__out = __inp",
+        {"__out": laid_memlet},
+        input_nodes={packed: packed_node},
+        output_nodes={laid: destination},
+        external_edges=True,
+    )
+
+
 def conversion(state: SDFGState, logical: str, laid: str, layout: IndexMap, inward: bool) -> None:
     """A map over the logical index space moving ``logical`` into the laid-out ``laid`` (or back)."""
     params = [f"__r{d}" for d in range(len(layout.shape))]
     ranges = {p: f"0:{extent}" for p, extent in zip(params, layout.shape, strict=True)}
     position = ", ".join(layout.physical(params))
     logical_at, laid_at = ", ".join(params), position
-    source, target = (f"{logical}[{logical_at}]", f"{laid}[{laid_at}]") if inward else (f"{laid}[{laid_at}]", f"{logical}[{logical_at}]")
+    source, target = (
+        (f"{logical}[{logical_at}]", f"{laid}[{laid_at}]")
+        if inward
+        else (f"{laid}[{laid_at}]", f"{logical}[{logical_at}]")
+    )
     state.add_mapped_tasklet(
         f"relayout_{'in' if inward else 'out'}_{logical}",
         ranges,
@@ -321,8 +445,8 @@ def relayout_array(sdfg: dace.SDFG, name: str, layout: IndexMap) -> str:
         return name
     laid = laid_name(name)
     read, written = is_read(sdfg, name), is_written(sdfg, name)
-    rewrite_accesses(sdfg, name, laid, layout)
     sdfg.add_datadesc(laid, laid_out_descriptor(desc, layout, transient=True))
+    rewrite_accesses(sdfg, name, laid, layout)
     if read:
         conversion(sdfg.add_state_before(sdfg.start_block, f"relayout_in_{name}"), name, laid, layout, inward=True)
     if written:

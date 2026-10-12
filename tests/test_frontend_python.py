@@ -3,7 +3,6 @@
 gives what the original gives on the logical arrays."""
 
 import ast
-import importlib.util
 import inspect
 import textwrap
 from collections.abc import Callable
@@ -12,6 +11,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+from conftest import mpi_or_skip
 from relayout.convert import from_layout, to_layout
 from relayout.frontends.python import LayoutError, rewrite
 from relayout.layout import IndexMap
@@ -74,17 +74,6 @@ def test_a_cut_array_used_whole_is_refused_by_its_line() -> None:
 
 def exchange(comm: Any, A: np.ndarray) -> None:  # an mpi4py communicator
     comm.Sendrecv(A[0, :], dest=0, recvbuf=A[2, :], source=0)
-
-
-def mpi_or_skip() -> Any:  # the mpi4py.MPI module
-    """mpi4py's ``MPI``, or a skip when the extra or an MPI library is missing."""
-    if importlib.util.find_spec("mpi4py") is None:
-        pytest.skip("no mpi4py (extra 'mpi')")
-    try:
-        from mpi4py import MPI  # optional extra, and it loads the MPI library
-    except RuntimeError as exc:
-        pytest.skip(f"mpi4py finds no MPI library: {str(exc).splitlines()[0]}")
-    return MPI
 
 
 def test_mpi_buffers_are_packed_and_unpacked() -> None:

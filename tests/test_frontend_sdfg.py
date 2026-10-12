@@ -102,7 +102,12 @@ ROTATED = [Permute("A", ("i2", "i0", "i1"))]
             {"A": ROTATED},
             lambda a, b: np.tensordot(a, b, axes=([1, 2], [0, 1])),
         ),
-        (transpose, {"A": (4, 5, 3), "C": (3, 4, 5)}, {"A": ROTATED, "C": ROTATED}, lambda a: np.transpose(a, (2, 0, 1))),
+        (
+            transpose,
+            {"A": (4, 5, 3), "C": (3, 4, 5)},
+            {"A": ROTATED, "C": ROTATED},
+            lambda a: np.transpose(a, (2, 0, 1)),
+        ),
     ],
 )
 def test_library_nodes_absorb_a_permutation(program: object, shapes: dict, layouts: dict, reference: object) -> None:

@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from conftest import mpi_or_skip
 from relayout.kernels import omen_sse
 
 pytestmark = pytest.mark.mpi
@@ -24,8 +25,7 @@ def flang_missing() -> bool:
 
 
 def comm_or_skip():
-    MPI = pytest.importorskip("mpi4py.MPI")
-    comm = MPI.COMM_WORLD
+    comm = mpi_or_skip().COMM_WORLD
     if comm.Get_size() < 2:
         pytest.skip("needs mpirun -n >= 2")
     return comm
