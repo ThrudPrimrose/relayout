@@ -578,6 +578,7 @@ mpi = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "ml-dtypes" },
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "pytest-timeout" },
@@ -598,6 +599,7 @@ provides-extras = ["mpi", "fortran"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "ml-dtypes" },
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "pytest-timeout" },

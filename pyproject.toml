@@ -24,7 +24,7 @@ mpi = ["mpi4py"]
 fortran = ["dace-fortran", "nanobind"]
 
 [dependency-groups]
-dev = ["pytest", "pytest-timeout", "ruff", "pre-commit"]
+dev = ["pytest", "pytest-timeout", "ruff", "pre-commit", "ml-dtypes"]
 
 [tool.uv.sources]
 # dace comes from the override below, not from a source: uv applies a git dependency's sources, so a dace source here
