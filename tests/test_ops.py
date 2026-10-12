@@ -16,6 +16,7 @@ from relayout.ops import (
     AxisSplit,
     Block,
     Cast,
+    Dim,
     Distribute,
     Format,
     LinearShuffle,
@@ -132,6 +133,31 @@ def test_operations_see_what_the_previous_ones_left() -> None:
     assert state.arrays["x"].replicated
 
 
+def test_a_zip_of_one_precision_is_a_field_dimension() -> None:
+    """Three components of one precision become a last dimension of extent 3 the digit operations place:
+    field-outer is SoA, and unzip splits it back; mixed precisions make a struct."""
+    xyz = [ArraySpec(name, 1) for name in ("x", "y", "z")]
+    soa = [Zip(("x", "y", "z"), "p"), Permute("p", ("i1", "i0"))]
+    state = run(soa, xyz, (), "operations")
+    assert state.arrays["p"].fields == ("x", "y", "z")
+    layout = state.layout("p", ["N", "3"])
+    assert layout.view() == ((None, None), (1, 0))
+    back = run([Zip(("x", "y", "z"), "p"), Unzip("p", ("u", "v", "w"))], xyz, (), "operations")
+    assert sorted(back.arrays) == ["u", "v", "w"]
+    mixed = run([Cast("x", Precision.FP32), Zip(("x", "y"), "q")], xyz, (), "operations")
+    assert mixed.arrays["q"].members == (("x", Precision.FP32), ("y", None))
+    with pytest.raises(ValueError, match="splits into 3 array"):
+        run([Zip(("x", "y", "z"), "p"), Unzip("p", ("u", "v"))], xyz, (), "operations")
+
+
+def test_unzip_along_a_dimension_splits_an_array() -> None:
+    """SplitArray: one array per index of a small dimension (the extent is the frontend's to check)."""
+    state = run([Unzip("q", ("q_rain", "q_ice"), dim=Dim(1))], [ArraySpec("q", 2)], (), "operations")
+    assert {name: array.digits.ndim for name, array in state.arrays.items()} == {"q_rain": 1, "q_ice": 1}
+    with pytest.raises(ValueError, match="no dimension 2"):
+        run([Unzip("q", ("a", "b"), dim=Dim(2))], [ArraySpec("q", 2)], (), "operations")
+
+
 def test_a_complex_array_is_one_element_and_a_struct() -> None:
     """A native struct (complex) is laid out and cast like any array, and unzips into its members,
     which keep its precision and placement."""
@@ -167,7 +193,7 @@ def test_a_non_row_major_local_order_is_refused_with_the_permute_that_fixes_it()
         ([Format("A", "csr")], "format applies to sparse arrays"),
         ([Distribute("A", 0, dim=0, scheme=Scheme.BLOCK), Replicate("A")], "cannot also be replicated"),
         ([Block("A", "i0", "2", ("o", "f")), Zip(("A", "B"), "W")], "regroups whole arrays"),
-        ([Unzip("A", ("a", "b"))], "has 0 member"),
+        ([Unzip("A", ("a", "b"))], "neither a struct nor zipped"),
         ([Block("A", "i0", "4", ("o", "f")), Replicate("A")], "replicate it before any digit operation"),
         (
             [Block("A", "i0", "8", ("a", "b")), Block("A", "b", "4", ("c", "d")), Unblock("A", ("a", "d"), "4", "x")],
@@ -277,6 +303,8 @@ if __name__ == "__main__":
     test_the_default_layout_raises_to_operations_that_lower_back(2)
     test_the_default_layout_raises_to_operations_that_lower_back(3)
     test_operations_see_what_the_previous_ones_left()
+    test_a_zip_of_one_precision_is_a_field_dimension()
+    test_unzip_along_a_dimension_splits_an_array()
     test_a_complex_array_is_one_element_and_a_struct()
     test_a_non_row_major_local_order_is_refused_with_the_permute_that_fixes_it()
     test_an_operation_that_cannot_apply_is_refused_by_name([Pad("A", "i0", "4")], "pad is not implemented yet")

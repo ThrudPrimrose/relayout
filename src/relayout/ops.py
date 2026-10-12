@@ -367,13 +367,16 @@ class DigitTuple:
     """One array's digit tuple while the operations apply. ``grid`` None = names and shapes
     only (an expression is not evaluated, its digit's extent stays unknown)."""
 
-    __slots__ = ("digits", "distributed", "grid", "names", "ndim", "pads", "renumbers", "where")
+    __slots__ = ("digits", "distributed", "grid", "initial", "names", "ndim", "pads", "renumbers", "where")
 
-    def __init__(self, ndim: int, grid: Sequence[int] | None, where: str) -> None:
+    def __init__(self, ndim: int, grid: Sequence[int] | None, where: str, extents: Sequence[int | None] = ()) -> None:
         self.ndim = ndim
         self.grid = None if grid is None else tuple(grid)
         self.names = {} if grid is None else grid_names(grid)
-        self.digits = [Digit(DIM_DIGIT.format(d), d, 1, None) for d in range(ndim)]
+        known = list(extents) or [None] * ndim
+        self.digits = [Digit(DIM_DIGIT.format(d), d, 1, known[d]) for d in range(ndim)]
+        #: The digits as the array starts, before any operation.
+        self.initial = [digit.shape() for digit in self.digits]
         #: (the distributed digit, its grid dim), in distribute order.
         self.distributed: list[tuple[Digit, int]] = []
         #: Digit name -> its dead cells.
@@ -396,7 +399,7 @@ class DigitTuple:
 
     def whole(self) -> bool:
         """Whether every dimension is still its one uncut digit, in order (names aside)."""
-        return [digit.shape() for digit in self.digits] == [(d, 1, None, False) for d in range(self.ndim)]
+        return [digit.shape() for digit in self.digits] == self.initial
 
     def find(self, name: str) -> int:
         for position, digit in enumerate(self.digits):
@@ -530,7 +533,10 @@ class DigitTuple:
             for rank, _ in self.distributed:
                 if not rank.band and rank.dim == digit.dim and stride >= rank.stride * (rank.extent or 1):
                     stride //= rank.extent or 1
-            axes.append(Axis(digit.name, digit.dim, stride, digit.extent, self.pads.get(digit.name, 0)))
+            only = sum(other.dim == digit.dim for other in self.digits) == 1 and stride == 1
+            axes.append(
+                Axis(digit.name, digit.dim, stride, None if only else digit.extent, self.pads.get(digit.name, 0))
+            )
         return IndexMap(tuple(str(extent) for extent in shape), tuple(axes), tuple(self.renumbers))
 
     def lower(self, where: str, array: str) -> list[AxisSplit | None]:
@@ -563,6 +569,8 @@ class ArraySpec:
     sparse: bool = False
     members: tuple[str, ...] = ()
     native: bool = False
+    #: Each dimension's extent where it is known without the shape (a zipped array's field), else None.
+    extents: tuple[int | None, ...] = ()
 
 
 class ArrayState:
@@ -570,6 +578,7 @@ class ArrayState:
 
     __slots__ = (
         "digits",
+        "fields",
         "format",
         "location",
         "members",
@@ -590,7 +599,9 @@ class ArrayState:
     ) -> None:
         self.name = spec.name
         self.sparse = spec.sparse
-        self.digits = DigitTuple(spec.ndim, grid, where)
+        self.digits = DigitTuple(spec.ndim, grid, where, spec.extents)
+        #: The arrays a zip of one precision fused along the last dimension, in order.
+        self.fields: tuple[str, ...] = ()
         #: A struct's fields with their precisions (None = the problem precision).
         self.members = members or tuple((member, None) for member in spec.members)
         self.native = spec.native
@@ -737,8 +748,10 @@ class Format(Operation):
 @operation
 @dataclass(frozen=True, slots=True)
 class Zip(Operation):
-    """Fuse whole arrays ``arrays`` of one shape into one array ``into`` of structs, one member per array
-    in order, each keeping its precision."""
+    """Fuse whole arrays ``arrays`` of one shape into one array ``into``. Arrays of one precision become a
+    new last dimension, the field (``into[..., k]`` is ``arrays[k]``), which the digit operations then
+    place like any other (field-outer is SoA, field-inner AoS, blocked between AoSoA); arrays of different
+    precisions become one array of structs, one member per array in order, each keeping its precision."""
 
     action: ClassVar[Action] = Action.ZIP
     lowers: ClassVar[bool] = False
@@ -747,8 +760,8 @@ class Zip(Operation):
 
     def apply(self, state: State) -> None:
         fields = [state.untouched(name, self) for name in self.arrays]
-        if any(field.members for field in fields):
-            raise ValueError(f"{state.where}: a zip fuses plain arrays; unzip a struct first")
+        if any(field.members or field.fields for field in fields):
+            raise ValueError(f"{state.where}: a zip fuses plain arrays; unzip a struct or a zipped array first")
         ndims = {field.digits.ndim for field in fields}
         if len(ndims) != 1:
             raise ValueError(f"{state.where}: zipped arrays must have one shape; {list(self.arrays)} do not")
@@ -758,37 +771,60 @@ class Zip(Operation):
         state.fresh(self.into)
         for name in self.arrays:
             del state.arrays[name]
-        spec = ArraySpec(self.into, ndims.pop())
-        state.arrays[self.into] = ArrayState(
-            spec, state.grid, state.where, tuple((field.name, field.precision) for field in fields)
-        )
-        state.arrays[self.into].location = locations.pop()
+        ndim, precisions = ndims.pop(), {field.precision for field in fields}
+        if len(precisions) == 1:
+            spec = ArraySpec(self.into, ndim + 1, extents=(None,) * ndim + (len(fields),))
+            zipped = ArrayState(spec, state.grid, state.where)
+            zipped.fields, zipped.precision = tuple(self.arrays), precisions.pop()
+        else:
+            members = tuple((field.name, field.precision) for field in fields)
+            zipped = ArrayState(ArraySpec(self.into, ndim), state.grid, state.where, members)
+        zipped.location = locations.pop()
+        state.arrays[self.into] = zipped
 
 
 @operation
 @dataclass(frozen=True, slots=True)
 class Unzip(Operation):
-    """Split the whole struct array ``array`` into one array per member, named ``into`` in member order,
-    each keeping its member's precision. A complex array is the struct ``(re, im)``."""
+    """Split the whole array ``array`` into the arrays ``into``: a struct into one array per member (a
+    complex array is the struct ``(re, im)``), a zipped array along its field, or, with ``dim``, any
+    array along dimension ``dim``, one array per index (its extent must be ``len(into)``). Each keeps
+    the precision and placement it had."""
 
     action: ClassVar[Action] = Action.UNZIP
     lowers: ClassVar[bool] = False
     array: ArrayName
     into: ArrayNames
+    dim: Dim | None = None
 
     def apply(self, state: State) -> None:
-        struct = state.untouched(self.array, self)
-        if len(struct.members) != len(self.into):
-            raise ValueError(
-                f"{state.where}: {self.array!r} has {len(struct.members)} member(s) "
-                f"{[m for m, _ in struct.members]}; name one array per member"
+        whole = state.untouched(self.array, self)
+        ndim = whole.digits.ndim
+        if self.dim is not None:
+            if self.dim >= ndim or (whole.members and not whole.native):
+                raise ValueError(f"{state.where}: {self.array!r} has no dimension {self.dim} to split along")
+            extent = whole.digits.digits[self.dim].extent
+            parts = [(name, whole.precision) for name in self.into]
+            ndim -= 1
+        elif whole.fields:
+            extent, parts, ndim = len(whole.fields), [(name, whole.precision) for name in self.into], ndim - 1
+        else:
+            extent, parts = (
+                len(whole.members),
+                [(name, p) for name, (_, p) in zip(self.into, whole.members, strict=False)],
             )
+            if not whole.members:
+                raise ValueError(
+                    f"{state.where}: {self.array!r} is neither a struct nor zipped; name the dim to split along"
+                )
+        if extent is not None and extent != len(self.into):
+            raise ValueError(f"{state.where}: {self.array!r} splits into {extent} array(s); name one per part")
         del state.arrays[self.array]
-        for name, (_member, precision) in zip(self.into, struct.members, strict=True):
+        for name, precision in parts:
             state.fresh(name)
-            state.arrays[name] = ArrayState(ArraySpec(name, struct.digits.ndim), state.grid, state.where)
+            state.arrays[name] = ArrayState(ArraySpec(name, ndim), state.grid, state.where)
             state.arrays[name].precision = precision
-            state.arrays[name].location = struct.location
+            state.arrays[name].location = whole.location
 
 
 class DigitOperation(Operation):
