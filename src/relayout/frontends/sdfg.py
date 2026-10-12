@@ -36,9 +36,10 @@ from dace.sdfg.graph import MultiConnectorEdge
 from dace.sdfg.state import SDFGState
 
 from relayout.layout import IndexMap
+from relayout.ops import ArraySpec, Cast, DigitOperation, Requests
 from relayout.rules import einsum_operand, flips_transpose, transpose_axes
 
-__all__ = ["LayoutError", "laid_name", "physical_subset", "relayout_array", "rewrite_subscripts"]
+__all__ = ["LayoutError", "apply_requests", "laid_name", "physical_subset", "relayout_array", "rewrite_subscripts"]
 
 #: The prefix of the transient an argument is laid out into.
 LAID = "laid_"
@@ -454,3 +455,23 @@ def relayout_array(sdfg: dace.SDFG, name: str, layout: IndexMap) -> str:
             conversion(sdfg.add_state_after(sink, f"relayout_out_{name}"), name, laid, layout, inward=False)
     propagation.propagate_memlets_sdfg(sdfg)
     return laid
+
+
+def apply_requests(sdfg: dace.SDFG, requests: Requests) -> dict[str, str]:
+    """Lay ``sdfg``'s arrays out as ``requests``' operations leave them (run over the SDFG's arrays,
+    single node); returns each laid-out array's working name (:func:`relayout_array`). A precision is
+    an element type, FP-Arena's transformation and not a layout: a ``cast`` is refused here."""
+    casts = [op.array for op in requests.operations if isinstance(op, Cast)]
+    if casts:
+        raise LayoutError(f"cast of {casts}: an SDFG changes element types through FP-Arena, not relayout")
+    arrays = {
+        name: desc
+        for name, desc in sdfg.arrays.items()
+        if isinstance(desc, data.Array) and not isinstance(desc, data.View)
+    }
+    state = requests.run([ArraySpec(name, len(desc.shape)) for name, desc in arrays.items()])
+    laid_out = {op.array for op in requests.operations if isinstance(op, DigitOperation)}
+    return {
+        name: relayout_array(sdfg, name, state.layout(name, [str(extent) for extent in arrays[name].shape]))
+        for name in sorted(laid_out)
+    }

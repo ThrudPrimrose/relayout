@@ -23,7 +23,9 @@ def exchange(A: dace.float64[P, N], B: dace.float64[P, N]):  # noqa: N803
 def laid_out_exchange() -> dace.SDFG:
     sdfg = exchange.to_sdfg(simplify=True)
     transposed = run([Permute("A", ("i1", "i0"))], [ArraySpec("A", 2)], (), "ops").layout("A", ["P", "N"])
-    padded = run([Pad("A", "i1", "2"), Permute("A", ("i1", "i0"))], [ArraySpec("A", 2)], (), "ops").layout("A", ["P", "N"])
+    padded = run([Pad("A", "i1", "2"), Permute("A", ("i1", "i0"))], [ArraySpec("A", 2)], (), "ops").layout(
+        "A", ["P", "N"]
+    )
     relayout_array(sdfg, "A", transposed)
     relayout_array(sdfg, "B", padded)
     return sdfg

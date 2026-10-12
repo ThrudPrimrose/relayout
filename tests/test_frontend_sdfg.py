@@ -6,9 +6,10 @@ import numpy as np
 import pytest
 
 import dace
-from relayout.frontends.sdfg import LayoutError, relayout_array
+from relayout.frontends.sdfg import LayoutError, apply_requests, relayout_array
 from relayout.layout import IndexMap
 from relayout.ops import ArraySpec, Block, Pad, Permute, Shuffle, run
+from relayout.requests import parse_requests
 
 N, M = (dace.symbol(s) for s in "NM")
 
@@ -123,6 +124,29 @@ def test_library_nodes_absorb_a_permutation(program: object, shapes: dict, layou
     np.testing.assert_allclose(args["C"], expected, rtol=1e-12)
 
 
+def test_a_json_request_lays_out_the_program() -> None:
+    """The request an agent sends is the SDFG's layout: one JSON, the same operations."""
+    request = parse_requests(
+        {
+            "operations": [
+                {"action": "block", "array": "A", "digit": "i1", "factor": 4, "into": ["o", "f"]},
+                {"action": "permute", "array": "A", "order": ["o", "i0", "f"]},
+                {"action": "pad", "array": "B", "digit": "i1", "amount": 3},
+            ]
+        }
+    )
+    sdfg = stencil.to_sdfg(simplify=True)
+    assert apply_requests(sdfg, request) == {"A": "laid_A", "B": "laid_B"}
+    a = np.random.default_rng(5).standard_normal((3, 8))
+    b = np.zeros((3, 8))
+    sdfg(A=a, B=b, N=3, M=8)
+    np.testing.assert_allclose(b, reference(a))
+    with pytest.raises(LayoutError, match="FP-Arena"):
+        apply_requests(
+            stencil.to_sdfg(), parse_requests({"operations": [{"action": "cast", "array": "A", "to": "fp32"}]})
+        )
+
+
 def test_a_library_node_without_a_rule_is_refused() -> None:
     @dace.program
     def product(A: dace.float64[N, N], x: dace.float64[N], y: dace.float64[N]):  # noqa: N803
@@ -137,4 +161,5 @@ if __name__ == "__main__":
     test_laid_out_arguments_and_transients_compute_the_same(
         [Permute("A", ("i1", "i0"))], [Pad("A", "i0", "2")], [Permute("A", ("i1", "i0"))]
     )
+    test_a_json_request_lays_out_the_program()
     test_a_library_node_without_a_rule_is_refused()
