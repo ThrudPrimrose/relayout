@@ -23,9 +23,8 @@ and SoA Layout in C++," GPU Computing Gems Jade, 2012; Sung, Liu & Hwu, "DL: a d
 transformation system for heterogeneous computing," InPar 2012 (ASTA = AoSoA). Primitives: Zip, Block.
 """
 
-import numpy
-
 import dace
+import numpy
 from dace.transformation.layout.zip_arrays import ZipArrays, aosoa_layout
 
 N = dace.symbol("N")
@@ -55,7 +54,6 @@ def candidates():
         ZipArrays(zip_map={"cplx": ["re", "im"]}).apply_pass(sdfg, {})
 
     def aosoa(vector_width):
-
         def apply(sdfg, vector_width=vector_width):
             aosoa_layout(sdfg, "cplx", ["re", "im"], vector_width)
 

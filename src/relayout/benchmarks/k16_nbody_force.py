@@ -19,9 +19,8 @@ singularity. Source: npbench ``nbody`` (all-pairs ``getAcc`` kernel); Cabana AoS
 JOSS'22); SC26 layout paper (Permute over an O(N^2) reduction).
 """
 
-import numpy
-
 import dace
+import numpy
 from dace.transformation.layout.brute_force import permutation_candidates
 
 N = dace.symbol("N")

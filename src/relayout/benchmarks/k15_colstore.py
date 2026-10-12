@@ -11,9 +11,8 @@ Source: Copeland & Khoshafian, SIGMOD'85 (DSM); Stonebraker et al., C-Store VLDB
 al., PAX VLDB'01.
 """
 
-import numpy
-
 import dace
+import numpy
 from dace.transformation.layout.brute_force import permutation_candidates
 
 N, C = dace.symbol("N"), dace.symbol("C")
@@ -39,7 +38,6 @@ def candidates():
 
 
 def run_closure(inputs, n, c):
-
     def run(sdfg):
         out = numpy.zeros(c)
         sdfg(T=inputs["T"].copy(), out=out, N=n, C=c)

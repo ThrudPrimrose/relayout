@@ -23,9 +23,8 @@ MPI-M," QJRMS 141, 2015 (dynamical core); M. Giorgetta et al., "The ICON-A model
 simulations on GPUs," GMD 2022 ((nproma, nlev, nblocks) unit-stride order); SC26 layout paper SS IV-D.
 """
 
-import numpy
-
 import dace
+import numpy
 from dace.transformation.layout.brute_force import permutation_candidates
 
 NI, NJ, NK = dace.symbol("NI"), dace.symbol("NJ"), dace.symbol("NK")

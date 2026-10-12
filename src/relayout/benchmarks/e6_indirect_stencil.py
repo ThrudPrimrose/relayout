@@ -39,9 +39,8 @@ ICON-A model for direct QBO simulations on GPUs," GMD 2022 ((nproma, nlev) vs le
 SC26 layout paper Listing 2 (E6_VelocityTendencies indirect stencil), connectivity AoS/SoA decision.
 """
 
-import numpy
-
 import dace
+import numpy
 from dace.transformation.layout.brute_force import permutation_candidates
 
 NC, NV, NE, NL = dace.symbol("NC"), dace.symbol("NV"), dace.symbol("NE"), dace.symbol("NL")

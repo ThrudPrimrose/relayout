@@ -1,10 +1,10 @@
 """Distributed OMEN SSE (energy -> momentum Alltoall). Run under ``mpirun -n 2 pytest tests/test_omen_sse_mpi.py``."""
 
-import shutil
 from pathlib import Path
 
 import numpy as np
 import pytest
+from dace_fortran.llvm_toolchain import find_flang
 
 from relayout.kernels import omen_sse
 
@@ -23,10 +23,22 @@ def comm_or_skip():
 
 
 def build_on_root(comm, build):
-    """Compile on rank 0 only, then let the others load the same artifact."""
+    """Build and compile on rank 0 only, then let the others load the same artifact.
+
+    Rank 0's build error is broadcast, so every rank raises it instead of the others waiting in the compile broadcast.
+    """
     from dace.sdfg.utils import distributed_compile
 
-    return distributed_compile(build() if comm.Get_rank() == 0 else None, comm)
+    sdfg, error = None, None
+    if comm.Get_rank() == 0:
+        try:
+            sdfg = build()
+        except Exception as exc:  # re-raised on every rank below
+            error = f"{type(exc).__name__}: {exc}"
+    error = comm.bcast(error, root=0)
+    if error is not None:
+        raise RuntimeError(f"rank 0 failed to build the SDFG: {error}")
+    return distributed_compile(sdfg, comm)
 
 
 def local_problem(comm):
@@ -37,18 +49,18 @@ def local_problem(comm):
     Nkzl, NEl = SIZE["Nkz"] // P, SIZE["NE"] // P
     Gl = G[:, rank * NEl : (rank + 1) * NEl].copy()
     expected = Sigma[rank * Nkzl : (rank + 1) * Nkzl]
-    sizes = dict(
-        P=P,
-        Nkzl=Nkzl,
-        NEl=NEl,
-        Nqz=SIZE["Nqz"],
-        Nw=SIZE["Nw"],
-        N3D=SIZE["N3D"],
-        NA=SIZE["NA"],
-        NB=SIZE["NB"],
-        Norb=SIZE["Norb"],
-    )
-    return dict(neigh_idx=neigh_idx, dH=dH, Gl=Gl, D=D), expected, sizes
+    sizes = {
+        "P": P,
+        "Nkzl": Nkzl,
+        "NEl": NEl,
+        "Nqz": SIZE["Nqz"],
+        "Nw": SIZE["Nw"],
+        "N3D": SIZE["N3D"],
+        "NA": SIZE["NA"],
+        "NB": SIZE["NB"],
+        "Norb": SIZE["Norb"],
+    }
+    return {"neigh_idx": neigh_idx, "dH": dH, "Gl": Gl, "D": D}, expected, sizes
 
 
 def test_python_frontend_mpi():
@@ -63,7 +75,12 @@ def test_python_frontend_mpi():
 
 
 @pytest.mark.fortran
-@pytest.mark.skipif(shutil.which("flang") is None, reason="no LLVM flang on PATH")
+@pytest.mark.skipif(find_flang() is None, reason="no LLVM flang found")
+@pytest.mark.xfail(
+    strict=True,
+    reason="dace-fortran main cannot build MATMUL over a data-indexed section, into a section destination or inside "
+    "an expression; fixed by spcl/dace-fortran#5",
+)
 def test_fortran_frontend_mpi(tmp_path_factory):
     import dace_fortran
 
@@ -78,5 +95,6 @@ def test_fortran_frontend_mpi(tmp_path_factory):
     )
     fargs = {n: np.asfortranarray(v) for n, v in args.items()}
     Sigmal = np.zeros_like(expected, order="F")
-    func(**fargs, Sigmal=Sigmal, **sizes)
+    # Fortran names are case-insensitive: the SDFG declares them lower-case
+    func(**{name.lower(): value for name, value in {**fargs, "Sigmal": Sigmal, **sizes}.items()})
     np.testing.assert_allclose(Sigmal, expected, rtol=1e-12)

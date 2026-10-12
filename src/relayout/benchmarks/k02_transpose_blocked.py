@@ -20,9 +20,8 @@ Source: Springer, Su, Bientinesi, "HPTT," ARRAY@PLDI'17 (reference transposer); 
 paper SS IV-B2 (transpose microbenchmark, Block primitive).
 """
 
-import numpy
-
 import dace
+import numpy
 from dace.transformation.layout.brute_force import block_candidates, permutation_candidates
 
 N = dace.symbol("N")

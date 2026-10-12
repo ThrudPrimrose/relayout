@@ -36,9 +36,8 @@ sparse symmetric matrices," ACM 1969 (vertex ordering); SC26 layout-algebra pape
 gather isolation: Pad width, Block rows, Permute ELL<->SELL).
 """
 
-import numpy
-
 import dace
+import numpy
 from dace.transformation.layout.brute_force import block_candidates, permutation_candidates
 from dace.transformation.layout.pad_dimensions import PadDimensions
 
@@ -104,7 +103,7 @@ def oracle(ecol, eval_, x):
 def make_inputs(side=8, seed=0):
     """Build the grid5 graph, convert to CSR, pad to ELL, and draw a random ``x`` (int64 index array)."""
     edges, n = grid5(side)
-    indptr, col, val, row = to_csr(edges, n)
+    indptr, col, val, _row = to_csr(edges, n)
     ecol, eval_, w = make_ell(indptr, col, val, n)
     if w != W:
         raise ValueError(f"k05_spmv: grid5(side={side}) has max degree {w}, expected W={W}")

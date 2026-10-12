@@ -15,6 +15,7 @@ module's ``candidates()`` still enumerates the full family for a real (timed) sw
 the invariant; timing is not asserted."""
 
 from dace.transformation.layout.brute_force import best, sweep
+
 from relayout.benchmarks import (
     atax,
     bicg,

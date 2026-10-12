@@ -11,9 +11,8 @@ neighbor access -- SplitDimensions blocks the offset indices ``x[i-1]``/``x[i+1]
 Source: Henretty et al., CC'11 (data-layout transformation for SIMD stencils).
 """
 
-import numpy
-
 import dace
+import numpy
 from dace.transformation.layout.brute_force import block_candidates
 
 N = dace.symbol("N")

@@ -15,9 +15,8 @@ Source: J. D. McCalpin, "Memory Bandwidth and Machine Balance in Current High Pe
 Computers," IEEE TCCA Newsletter, 1995 (STREAM Triad); SC26 layout paper (fragmentation parameter).
 """
 
-import numpy
-
 import dace
+import numpy
 from dace.transformation.layout.brute_force import block_candidates
 
 N = dace.symbol("N")

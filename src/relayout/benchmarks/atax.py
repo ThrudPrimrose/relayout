@@ -22,9 +22,8 @@ hide it. Sibling of k04 mvt (two nests, shared ``A`` read both ways); here the t
 through the transient ``tmp`` instead of writing two independent outputs.
 """
 
-import numpy
-
 import dace
+import numpy
 from dace.transformation.layout.brute_force import permutation_candidates
 
 M, N = dace.symbol("M"), dace.symbol("N")

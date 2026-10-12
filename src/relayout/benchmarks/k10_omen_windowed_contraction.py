@@ -24,9 +24,8 @@ Approach to Extreme-Scale Ab initio Dissipative Quantum Transport Simulations," 
 finalist; arXiv:1912.10024); NPBench 'sselfeng' (Ziogas et al., ICS'21); SC26 layout paper.
 """
 
-import numpy
-
 import dace
+import numpy
 from dace.transformation.layout.permute_dimensions import PermuteDimensions
 
 NA, NE = dace.symbol("NA"), dace.symbol("NE")

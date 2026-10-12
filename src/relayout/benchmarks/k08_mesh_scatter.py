@@ -51,9 +51,8 @@ uncompilable ``tab[std::make_tuple(c, v)]``). The Permute/Pad witnesses therefor
 table ``tsg``; the edge-index table stays a flat CSR-style gather index.
 """
 
-import numpy
-
 import dace
+import numpy
 from dace.libraries.layout.shuffle import register_shuffle
 from dace.transformation.layout.brute_force import permutation_candidates, shuffle_candidates
 from dace.transformation.layout.pad_dimensions import PadDimensions

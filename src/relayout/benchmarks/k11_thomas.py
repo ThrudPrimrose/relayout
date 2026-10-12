@@ -15,9 +15,8 @@ Source: Laszlo, Giles, Appleyard, ACM TOMS 42(4) 2016 (cuThomasBatch convention)
 QJRMS'15 (ICON vertical solvers).
 """
 
-import numpy
-
 import dace
+import numpy
 from dace.transformation.layout.permute_dimensions import PermuteDimensions
 
 K, NB = dace.symbol("K"), dace.symbol("NB")
@@ -83,7 +82,6 @@ def candidates():
 
 
 def run_closure(inputs, k, nb):
-
     def run(sdfg):
         x = numpy.zeros((k, nb))
         sdfg(a=inputs["a"].copy(), b=inputs["b"].copy(), c=inputs["c"].copy(), d=inputs["d"].copy(), x=x, K=k, NB=nb)

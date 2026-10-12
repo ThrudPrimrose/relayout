@@ -1,10 +1,10 @@
 """Single-process OMEN SSE: the Python and Fortran frontends against the numpy closed form."""
 
-import shutil
 from pathlib import Path
 
 import numpy as np
 import pytest
+from dace_fortran.llvm_toolchain import find_flang
 
 from relayout.kernels import omen_sse
 from relayout.kernels.omen_sse.sse import sse
@@ -47,7 +47,12 @@ def test_python_frontend():
 
 
 @pytest.mark.fortran
-@pytest.mark.skipif(shutil.which("flang") is None, reason="no LLVM flang on PATH")
+@pytest.mark.skipif(find_flang() is None, reason="no LLVM flang found")
+@pytest.mark.xfail(
+    strict=True,
+    reason="dace-fortran main cannot build MATMUL over a data-indexed section, into a section destination or inside "
+    "an expression; fixed by spcl/dace-fortran#5",
+)
 def test_fortran_frontend(tmp_path):
     import dace_fortran
 
@@ -58,6 +63,9 @@ def test_fortran_frontend(tmp_path):
     expected = Sigma.copy()
     omen_sse.reference(neigh_idx, dH, G, D, expected)
     # Column-major SDFG: hand it the same logical arrays in Fortran order.
-    fargs = {n: np.asfortranarray(v) for n, v in dict(neigh_idx=neigh_idx, dH=dH, G=G, D=D, Sigma=Sigma).items()}
-    sdfg(**fargs, **SIZE)
+    fargs = {
+        n: np.asfortranarray(v) for n, v in {"neigh_idx": neigh_idx, "dH": dH, "G": G, "D": D, "Sigma": Sigma}.items()
+    }
+    # Fortran names are case-insensitive: the SDFG declares them lower-case
+    sdfg(**{name.lower(): value for name, value in {**fargs, **SIZE}.items()})
     np.testing.assert_allclose(fargs["Sigma"], expected, rtol=1e-12)

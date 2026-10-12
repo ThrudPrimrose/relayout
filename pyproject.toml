@@ -11,6 +11,8 @@ requires-python = ">=3.12, <3.15"
 dependencies = [
     "dace",
     "dace-fortran",
+    # dace-fortran builds its nanobind bridge on first use but lists nanobind only in its testing group.
+    "nanobind",
     "numpy>=2.3.2",
     "islpy",
     "z3-solver",
@@ -42,7 +44,7 @@ addopts = "--maxfail=10 -ra"
 timeout = 1800
 markers = [
     "mpi: needs mpirun -n >= 2",
-    "fortran: needs LLVM flang on PATH",
+    "fortran: needs an LLVM flang (dace_fortran.llvm_toolchain.find_flang)",
 ]
 
 [tool.ruff]

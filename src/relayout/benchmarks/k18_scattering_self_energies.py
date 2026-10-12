@@ -26,9 +26,8 @@ Transport Simulations," SC'19 (Gordon Bell finalist; arXiv:1912.10024); npbench 
 (dense_linear_algebra); SC26 layout paper.
 """
 
-import numpy
-
 import dace
+import numpy
 from dace.transformation.layout.permute_dimensions import PermuteDimensions
 
 NA, NE = dace.symbol("NA"), dace.symbol("NE")

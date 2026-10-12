@@ -21,9 +21,8 @@ Source: P. Giannozzi et al., "QUANTUM ESPRESSO," J. Phys.: Condens. Matter 21 (2
 isolation). Elementwise accumulate form so the layout is honest -- a BLAS ``zaxpy`` would hide it.
 """
 
-import numpy
-
 import dace
+import numpy
 from dace.libraries.layout.shuffle import register_shuffle
 from dace.transformation.layout.brute_force import shuffle_candidates
 

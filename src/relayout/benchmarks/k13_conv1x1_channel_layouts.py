@@ -21,9 +21,8 @@ Georganas et al., "Anatomy of High-Performance Deep Learning Convolutions on SIM
 SC'18 (blocked conv layouts).
 """
 
-import numpy
-
 import dace
+import numpy
 from dace.transformation.layout.brute_force import permutation_candidates
 from dace.transformation.layout.normalize_schedule import normalize_schedule_for_layout
 from dace.transformation.layout.split_dimensions import SplitDimensions

@@ -8,8 +8,8 @@ Simulations", SC'19, doi.org/10.1145/3295500.3357156. Sizes follow the hpcagent-
 import numpy as np
 
 SIZES = {
-    "S": dict(Nkz=2, NE=4, Nqz=2, Nw=2, N3D=2, NA=6, NB=2, Norb=3),
-    "M": dict(Nkz=4, NE=16, Nqz=4, Nw=2, N3D=3, NA=128, NB=4, Norb=10),
+    "S": {"Nkz": 2, "NE": 4, "Nqz": 2, "Nw": 2, "N3D": 2, "NA": 6, "NB": 2, "Norb": 3},
+    "M": {"Nkz": 4, "NE": 16, "Nqz": 4, "Nw": 2, "N3D": 3, "NA": 128, "NB": 4, "Norb": 10},
 }
 
 

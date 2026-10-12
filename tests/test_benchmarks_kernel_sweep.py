@@ -8,6 +8,7 @@ the oracle and ``best()`` returns a correct one. Timing is not asserted (noisy o
 
 from dace.transformation.layout.brute_force import best, sweep
 from dace.transformation.layout.timing import compute_region_timer
+
 from relayout.benchmarks import k04_mvt, k11_thomas, k12_dlt_stencil, k15_colstore
 
 
@@ -15,7 +16,6 @@ def _sdfg_candidates(program, candidate_dict):
     """Turn ``{name: apply}`` into ``{name: make_sdfg}`` -- build a fresh SDFG and apply the layout."""
 
     def make_for(apply):
-
         def make():
             sdfg = program.to_sdfg(simplify=True)
             apply(sdfg)

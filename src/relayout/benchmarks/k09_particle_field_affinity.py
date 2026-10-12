@@ -19,9 +19,8 @@ reference affinity (PLDI'04); Chilimbi et al., cache-conscious structure definit
 Sung et al., in-place AoS->AoSoA (InPar'12).
 """
 
-import numpy
-
 import dace
+import numpy
 from dace.transformation.layout.zip_arrays import ZipArrays, aosoa_layout
 
 N = dace.symbol("N")

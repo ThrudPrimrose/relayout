@@ -18,9 +18,8 @@ al., NPBench (ICS'21). Reduction (not BLAS gemv) form so the layout is honest --
 internally and would hide the read-orientation conflict.
 """
 
-import numpy
-
 import dace
+import numpy
 from dace.transformation.layout.brute_force import permutation_candidates
 
 N, M = dace.symbol("N"), dace.symbol("M")

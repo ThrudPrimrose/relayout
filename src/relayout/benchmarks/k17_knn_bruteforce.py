@@ -19,9 +19,8 @@ each reproduces the argmin oracle. Ties resolve to the first (lowest) index in b
 FLANN/FAISS IVF); SC26 layout paper (Permute over an all-pairs scan).
 """
 
-import numpy
-
 import dace
+import numpy
 from dace.transformation.layout.brute_force import permutation_candidates
 
 NR, NQ = dace.symbol("NR"), dace.symbol("NQ")

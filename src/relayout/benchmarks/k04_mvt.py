@@ -13,9 +13,8 @@ Source: Pouchet & Yuki, PolyBench/C 4.2; Ziogas et al., NPBench (ICS'21). Reduct
 form so the layout is honest -- BLAS packs operands internally and would hide it.
 """
 
-import numpy
-
 import dace
+import numpy
 from dace.transformation.layout.brute_force import permutation_candidates
 
 N = dace.symbol("N")

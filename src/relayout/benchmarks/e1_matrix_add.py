@@ -23,9 +23,8 @@ the read operand); Chatterjee et al., "Nonlinear array layouts for hierarchical 
 ICS'99 (blocked layout).
 """
 
-import numpy
-
 import dace
+import numpy
 from dace.transformation.layout.brute_force import block_candidates, permutation_candidates
 
 N = dace.symbol("N")

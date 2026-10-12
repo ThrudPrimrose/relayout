@@ -39,9 +39,8 @@ per-key touch of ``A`` -- and drop the descent (it is a compute detail, not a
 layout decision).
 """
 
-import numpy
-
 import dace
+import numpy
 from dace.libraries.layout.shuffle import register_shuffle
 from dace.transformation.layout.brute_force import shuffle_candidates
 
