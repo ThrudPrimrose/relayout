@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "relayout"
+version = "0.1.0"
+description = "Layout transformation sequences on SDFGs: GPU linear layouts and distributed (MPI, NCCL/RCCL) data movement"
+readme = "README.md"
+requires-python = ">=3.12, <3.15"
+dependencies = [
+    "dace",
+    "dace-fortran",
+    "numpy>=2.3.2",
+    "islpy",
+    "z3-solver",
+]
+
+[project.optional-dependencies]
+mpi = ["mpi4py"]
+# hpcagent-bench pulls its full grading and agent stack; only needed to load its kernels and default layouts.
+bench = ["hpcagent-bench"]
+
+[dependency-groups]
+dev = ["pytest", "pytest-timeout", "ruff", "pre-commit"]
+
+[tool.uv.sources]
+dace = { git = "https://github.com/spcl/dace.git", branch = "extended" }
+dace-fortran = { git = "ssh://git@github.com/spcl/dace-fortran.git", branch = "main" }
+hpcagent-bench = { git = "ssh://git@github.com/spcl/HPCAgent-Bench.git", branch = "main" }
+
+[tool.uv]
+# dace-fortran pins dace@FaCe and hpcagent-bench pins an extended commit; one dace for all three.
+override-dependencies = ["dace @ git+https://github.com/spcl/dace.git@extended"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/relayout"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--maxfail=10 -ra"
+timeout = 1800
+markers = [
+    "mpi: needs mpirun -n >= 2",
+    "fortran: needs LLVM flang on PATH",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint.per-file-ignores]
+# Copied verbatim from dace@extended tests/transformations/layout/kernels.
+"src/relayout/benchmarks/k*.py" = ["E731"]
