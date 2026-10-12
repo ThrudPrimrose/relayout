@@ -1,21 +1,20 @@
 # Copyright 2026 ETH Zurich and the relayout authors.
-"""Layout op sequences: the request schema of a relayout and its lowering to a distribution.
+"""Relayout requests: how a caller asks for the data of a kernel's arrays to be changed.
 
-A layout is the mixed-radix digit algebra of dace extended ``dace/libraries/layout/algebra.py``. An
-array starts as one digit per dimension, named ``i0, i1, ...``; every op addresses digits by name:
-``block`` and ``split`` cut a digit into two named ones, ``permute`` reorders the tuple by names and
-``distribute`` hands a digit of extent ``P_g`` to grid dimension ``g``. Dimensions are numpy's, over a
-C-contiguous buffer; a Fortran kernel sees it with reversed extents, a codegen step after the ops.
-:func:`lower_layout` lowers a sequence to one :class:`AxisSplit` per dimension; a sequence it does not
-cover yet (pad, shuffle, a non-row-major local order) is refused by name, never approximated.
+A request has two parts. ``startup`` settles the run before any array is touched: the libraries to
+``load`` and the processor ``grid``, its extents as expressions over the rank count ``P``. ``operations``
+is a program run top to bottom over the kernel's arrays, each operation seeing what the previous ones
+left: ``cast`` changes an array's precision, ``format`` a sparse array's storage, ``zip`` / ``unzip``
+regroup arrays without changing their precisions, the digit operations (``block``, ``split``,
+``permute``, ...) reorder an array's storage, ``distribute`` / ``replicate`` hand it to the ranks and
+``place`` puts it in host or device memory.
 
-Every per-array op is one class registered under its JSON name (:func:`layout_op`) with its inverse
-and its effect on the :class:`DigitTuple`; a field's type (:data:`FIELD_CODECS`) is how it is read from
-and written to JSON, so adding an op is one class. ``zip`` / ``unzip`` turn several arrays into one or
-one into several, so they are group ops (:data:`GROUP_OPS`) outside any array's sequence.
-
-The processor grid is a list of extent expressions over the rank count ``P`` (:func:`grid_extents`), so
-one request is evaluated at every rank count a scaling run measures.
+An array starts as one digit per dimension, named ``i0, i1, ...``, over its row-major (numpy) index
+space; a Fortran kernel sees the same buffer with reversed extents, a codegen step after the
+operations. Every operation is one class registered under its :class:`Action` with typed fields, so
+its checks and its effect live in one place, and :mod:`relayout.requests` maps it one to one to JSON.
+:func:`lower` turns a run program into one :class:`AxisSplit` per distributed dimension; what it does
+not cover yet is refused by name, never approximated. Design: docs/layout.md.
 """
 
 import ast
@@ -23,72 +22,127 @@ import dataclasses
 import enum
 import math
 import operator
-import typing
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
-from typing import Any, ClassVar, NamedTuple, NewType, NoReturn
+from dataclasses import dataclass, field
+from typing import ClassVar, NamedTuple, NewType, NoReturn
 
 __all__ = [
     "DIM_DIGIT",
-    "FIELD_CODECS",
     "GRID_SYMBOL",
-    "GROUP_OPS",
-    "LAYOUT_OPS",
+    "OPERATIONS",
     "RANKS_SYMBOL",
+    "Action",
+    "ArrayName",
+    "ArrayNames",
+    "ArraySpec",
+    "ArrayState",
     "AxisSplit",
+    "BitMatrix",
+    "Bits",
     "Block",
+    "Cast",
     "Digit",
+    "DigitName",
+    "DigitNames",
+    "DigitOperation",
+    "DigitPair",
     "DigitTuple",
+    "Dim",
     "Distribute",
-    "GroupOp",
-    "LayoutOp",
+    "Expr",
+    "Format",
+    "FormatLabel",
+    "GridDim",
+    "IndexExprs",
     "LinearShuffle",
+    "Location",
+    "Operation",
     "Pad",
     "Permute",
+    "Place",
+    "Precision",
     "Registry",
     "RegistryError",
+    "Replicate",
+    "Requests",
     "Scheme",
     "Shuffle",
     "Split",
+    "Startup",
+    "State",
     "Unblock",
     "Unpad",
     "Unsplit",
     "Unzip",
+    "Width",
     "Zip",
     "check_index_expr",
     "eval_index",
-    "expr_json",
-    "from_json",
     "gf2_inverse",
     "grid_extents",
     "grid_names",
-    "group_op",
-    "groups_from_json",
-    "groups_json",
     "inverse_sequence",
-    "layout_op",
-    "lower_layout",
-    "op_json",
-    "ops_for_axes",
-    "parse_grid",
-    "parse_op",
-    "to_json",
+    "is_reserved",
+    "lower",
+    "normal_split",
+    "operation",
+    "operations_for_axes",
+    "run",
 ]
 
 #: Grid dimension ``g``'s extent in a factor/amount expression: ``P0``, ``P1``, ...
 GRID_SYMBOL = "P{}"
 #: The rank count in a grid extent expression.
 RANKS_SYMBOL = "P"
-#: The name of dimension ``d``'s digit before any op.
+#: The name of dimension ``d``'s digit before any operation.
 DIM_DIGIT = "i{}"
 
 
+class Action(enum.Enum):
+    """What an operation does; its JSON ``action``."""
+
+    CAST = "cast"
+    FORMAT = "format"
+    ZIP = "zip"
+    UNZIP = "unzip"
+    BLOCK = "block"
+    UNBLOCK = "unblock"
+    SPLIT = "split"
+    UNSPLIT = "unsplit"
+    PERMUTE = "permute"
+    PAD = "pad"
+    UNPAD = "unpad"
+    SHUFFLE = "shuffle"
+    LINEAR_SHUFFLE = "linear_shuffle"
+    DISTRIBUTE = "distribute"
+    REPLICATE = "replicate"
+    PLACE = "place"
+
+
 class Scheme(enum.Enum):
-    """The per-axis split a layout lowers to; the value is its JSON spelling."""
+    """How a distributed dimension is dealt to its grid dimension."""
 
     BLOCK = "block"
     BLOCK_CYCLIC = "block_cyclic"
     CYCLIC = "cyclic"
+
+
+class Location(enum.Enum):
+    """Where an array lives during the call."""
+
+    HOST = "host"
+    DEVICE = "device"
+
+
+class Precision(enum.Enum):
+    """The element types a ``cast`` may ask for."""
+
+    FP64 = "fp64"
+    FP32 = "fp32"
+    FP16 = "fp16"
+    BF16 = "bf16"
+    FP8_E4M3 = "fp8_e4m3"
+    FP8_E5M2 = "fp8_e5m2"
 
 
 def grid_names(grid: Sequence[int]) -> dict[str, int]:
@@ -186,13 +240,6 @@ def eval_index(text: str, names: Mapping[str, int], where: str) -> int:
 # ---- the processor grid ------------------------------------------------------------------------------
 
 
-def parse_grid(raw: object, where: str) -> tuple[str, ...]:
-    """A grid request: a non-empty list of extent expressions over ``P`` (ints allowed)."""
-    if not isinstance(raw, list) or not raw:
-        raise ValueError(f"{where} must be a non-empty list of extents over {RANKS_SYMBOL}; got {raw!r}")
-    return tuple(parse_expr(extent, f"{where}[{g}]") for g, extent in enumerate(raw))
-
-
 def grid_extents(grid: Sequence[str], ranks: int, where: str) -> tuple[int, ...] | None:
     """The grid ``grid`` spans at ``ranks`` ranks, or None when it does not span exactly that many (a
     square grid at an odd rank count); an extent below 1 is a request fault."""
@@ -202,16 +249,24 @@ def grid_extents(grid: Sequence[str], ranks: int, where: str) -> tuple[int, ...]
     return extents if math.prod(extents) == ranks else None
 
 
-# ---- op fields: one JSON codec per field type -----------------------------------------------------
+# ---- field types (each has a JSON codec in relayout.requests) -----------------------------------------------
 
+#: An array name.
+ArrayName = NewType("ArrayName", str)
+#: Two or more distinct array names.
+ArrayNames = NewType("ArrayNames", tuple[str, ...])
 #: A digit's name: an identifier other than the grid and rank symbols.
 DigitName = NewType("DigitName", str)
-#: Two or more distinct digit names (a permutation, the digits a shuffle renumbers).
+#: Distinct digit names (a permutation, the digits a shuffle renumbers).
 DigitNames = NewType("DigitNames", tuple[str, ...])
 #: The two digits a cut leaves, coarse then fine.
 DigitPair = NewType("DigitPair", tuple[str, str])
+#: An array dimension.
+Dim = NewType("Dim", int)
 #: A processor-grid dimension.
 GridDim = NewType("GridDim", int)
+#: A block width.
+Width = NewType("Width", int)
 #: An integer expression over ``P0, P1, ...`` (a factor, an amount, a part count).
 Expr = NewType("Expr", str)
 #: One index expression per shuffled digit, over the shuffled digits' names and ``P0, P1, ...``.
@@ -220,6 +275,8 @@ IndexExprs = NewType("IndexExprs", tuple[str, ...])
 Bits = NewType("Bits", tuple[int, ...])
 #: A square 0/1 matrix over GF(2): row ``r`` is output bit ``r`` as the XOR of the input bits it marks.
 BitMatrix = NewType("BitMatrix", tuple[tuple[int, ...], ...])
+#: A sparse format label (``csr``, ``bsr:4``, ...); the caller checks it against the formats it offers.
+FormatLabel = NewType("FormatLabel", str)
 
 
 def is_reserved(name: str) -> bool:
@@ -227,194 +284,63 @@ def is_reserved(name: str) -> bool:
     return name == RANKS_SYMBOL or (name[:1] == RANKS_SYMBOL and name[1:].isdigit())
 
 
-def parse_digit_name(value: object, where: str) -> str:
-    if not isinstance(value, str) or not value.isidentifier() or is_reserved(value):
-        raise ValueError(f"{where} must be a digit name (an identifier other than P, P0, P1, ...); got {value!r}")
-    return value
-
-
-def parse_digit_names(value: object, where: str) -> tuple[str, ...]:
-    if not isinstance(value, list) or not value:
-        raise ValueError(f"{where} must be a non-empty list of digit names; got {value!r}")
-    names = tuple(parse_digit_name(v, f"{where}[{k}]") for k, v in enumerate(value))
-    if len(set(names)) != len(names):
-        raise ValueError(f"{where} names a digit twice: {list(names)}")
-    return names
-
-
-def parse_digit_pair(value: object, where: str) -> tuple[str, ...]:
-    names = parse_digit_names(value, where)
-    if len(names) != len(("coarse", "fine")):
-        raise ValueError(f"{where} must name the two digits the cut leaves, coarse then fine; got {list(names)}")
-    return names
-
-
-def non_negative_int(value: object, where: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"{where} must be a non-negative int; got {value!r}")
-    return value
-
-
-def int_list(value: object, where: str) -> tuple[int, ...]:
-    if not isinstance(value, list) or not value:
-        raise ValueError(f"{where} must be a non-empty list of non-negative ints; got {value!r}")
-    return tuple(non_negative_int(v, f"{where}[{k}]") for k, v in enumerate(value))
-
-
-def parse_expr(value: object, where: str) -> str:
-    if isinstance(value, bool) or not isinstance(value, (int, str)):
-        raise ValueError(f"{where} must be an int or an integer expression; got {value!r}")
-    return check_index_expr(str(value), where)
-
-
-def parse_index_exprs(value: object, where: str) -> tuple[str, ...]:
-    if not isinstance(value, list) or not value or not all(isinstance(v, str) for v in value):
-        raise ValueError(f"{where} must be a list of index expressions over the shuffled digits; got {value!r}")
-    return tuple(check_index_expr(v, f"{where}[{k}]") for k, v in enumerate(value))
-
-
-def parse_bit_matrix(value: object, where: str) -> tuple[tuple[int, ...], ...]:
-    rows = value if isinstance(value, list) else None
-    if not rows or not all(isinstance(r, list) and len(r) == len(rows) and set(r) <= {0, 1} for r in rows):
-        raise ValueError(f"{where} must be a square 0/1 matrix (a list of rows); got {value!r}")
-    return tuple(tuple(int(b) for b in r) for r in rows)
-
-
-def expr_json(text: str) -> int | str:
-    """``text`` back as JSON: a plain integer literal as an int."""
-    return int(text) if text.lstrip("-").isdigit() else text
-
-
-def plain_json(value: object) -> object:
-    """A tuple field as a JSON list (nested for a matrix)."""
-    return [plain_json(v) for v in value] if isinstance(value, tuple) else value
-
-
-class FieldCodec(NamedTuple):
-    """How one field type is read from JSON (a request fault naming ``where`` when malformed) and written."""
-
-    parse: Callable[[object, str], Any]
-    dump: Callable[[Any], object] = plain_json
-
-
-#: Field type -> codec. A registered op may only declare fields of these types (checked at import).
-FIELD_CODECS: dict[object, FieldCodec] = {
-    DigitName: FieldCodec(parse_digit_name),
-    DigitNames: FieldCodec(parse_digit_names),
-    DigitPair: FieldCodec(parse_digit_pair),
-    GridDim: FieldCodec(non_negative_int),
-    Expr: FieldCodec(parse_expr, expr_json),
-    IndexExprs: FieldCodec(parse_index_exprs),
-    Bits: FieldCodec(int_list),
-    BitMatrix: FieldCodec(parse_bit_matrix),
-}
-
-
-# ---- the layout op registry ------------------------------------------------------------------------
-
-
-class LayoutOp:
-    """One op of an array's layout sequence. A subclass is a frozen slotted dataclass registered with
-    :func:`layout_op`; it names its JSON ``op``, applies itself to a :class:`DigitTuple` and inverts itself
-    given the digit names before it. ``lowers`` False = parsed and checked, refused at lowering as not
-    implemented yet."""
-
-    __slots__ = ()
-    op: ClassVar[str]
-    lowers: ClassVar[bool] = True
-
-    def validate(self, where: str) -> None:
-        """Checks across fields, past each field's own codec (a request fault naming ``where``)."""
-
-    def apply(self, digits: "DigitTuple") -> None:
-        raise NotImplementedError
-
-    def inverse(self, before: tuple[str, ...]) -> "LayoutOp":
-        """The op undoing this one, given the digit names before it."""
-        raise NotImplementedError
+# ---- the operation registry ------------------------------------------------------------------------
 
 
 class RegistryError(ValueError):
-    """An op class breaks the registry's contract, or its name is taken."""
+    """An operation class breaks the registry's contract, or its action is taken."""
 
 
-class Registry[T]:
-    """Op name -> op class, in registration order."""
+class Registry[K, T]:
+    """Key -> class, in registration order."""
 
     __slots__ = ("entries", "name")
 
     def __init__(self, name: str) -> None:
         self.name = name
-        self.entries: dict[str, T] = {}
+        self.entries: dict[K, T] = {}
 
-    def add(self, key: str, entry: T) -> None:
+    def add(self, key: K, entry: T) -> None:
         if key in self.entries:
             raise RegistryError(f"{self.name} {key!r} is registered twice")
         self.entries[key] = entry
 
-    def keys(self) -> tuple[str, ...]:
-        return tuple(self.entries)
+
+class Operation:
+    """One operation of a request's program. A subclass is a frozen slotted dataclass registered with
+    :func:`operation`: it names its :class:`Action`, checks itself against the :class:`State` and applies
+    its effect there. ``lowers`` False = parsed and checked, refused by :func:`lower` as not implemented
+    yet; ``sparse`` True = it applies to a sparse array too."""
+
+    __slots__ = ()
+    action: ClassVar[Action]
+    lowers: ClassVar[bool] = True
+    sparse: ClassVar[bool] = False
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        """Checks across fields, at construction (a request fault)."""
+
+    def apply(self, state: "State") -> None:
+        raise NotImplementedError
+
+    def inverse(self, before: tuple[str, ...]) -> "Operation":
+        """The operation undoing this one, given the array's digit names before it (digit operations)."""
+        raise ValueError(f"{self.action.value} has no inverse operation")
 
 
-#: JSON ``op`` name -> the per-array layout op class.
-LAYOUT_OPS: Registry[type[LayoutOp]] = Registry("layout op")
+#: Action -> its operation class.
+OPERATIONS: Registry[Action, type[Operation]] = Registry("operation")
 
 
-def op_fields(cls: type) -> dict[str, FieldCodec]:
-    """``cls``'s dataclass fields with their codecs; a field of an unregistered type is refused."""
-    hints = typing.get_type_hints(cls)
-    codecs: dict[str, FieldCodec] = {}
-    for spec in dataclasses.fields(cls):
-        codec = FIELD_CODECS.get(hints[spec.name])
-        if codec is None:
-            raise RegistryError(f"{cls.__name__}.{spec.name}: field type {hints[spec.name]!r} has no JSON codec")
-        codecs[spec.name] = codec
-    return codecs
-
-
-def layout_op[C: type[LayoutOp]](cls: C) -> C:
-    """Register a layout op class under its ``op`` name; it must define its own ``apply`` and ``inverse``."""
-    op_fields(cls)
-    missing = [method for method in ("apply", "inverse") if method not in vars(cls)]
-    if missing:
-        raise RegistryError(f"layout op {cls.op!r} must define {' and '.join(missing)}")
-    LAYOUT_OPS.add(cls.op, cls)
+def operation[C: type[Operation]](cls: C) -> C:
+    """Register an operation class under its action; it must define its own ``apply``."""
+    if "apply" not in vars(cls):
+        raise RegistryError(f"operation {cls.action.value!r} must define apply")
+    OPERATIONS.add(cls.action, cls)
     return cls
-
-
-def from_json[T](cls: type[T], raw: Mapping[str, object], where: str) -> T:
-    """An op of ``cls`` from its JSON object (the ``op`` key names the op, it is not a field)."""
-    codecs = op_fields(cls)
-    unknown = sorted(set(raw) - set(codecs) - {"op"})
-    if unknown:
-        raise ValueError(f"{where} has unknown field(s) {unknown}; its fields are {sorted(codecs)}")
-    return cls(**{name: codec.parse(raw.get(name), f"{where}.{name}") for name, codec in codecs.items()})
-
-
-def to_json(op: LayoutOp) -> dict[str, object]:
-    """``op``'s fields as JSON (without the ``op`` key)."""
-    values = dataclasses.asdict(op)  # type: ignore[call-overload]  # every registered op is a dataclass
-    return {name: codec.dump(values[name]) for name, codec in op_fields(type(op)).items()}
-
-
-def parse_op(raw: object, where: str) -> LayoutOp:
-    """One layout op from its JSON object; a malformed op is a request fault naming ``where``."""
-    if not isinstance(raw, dict) or not isinstance(raw.get("op"), str):
-        raise ValueError(f"{where} must be an object with an 'op' name; got {raw!r}")
-    cls = LAYOUT_OPS.entries.get(raw["op"])
-    if cls is None:
-        raise ValueError(f"{where}.op {raw['op']!r} is not a layout op; ops are {', '.join(LAYOUT_OPS.keys())}")
-    op = from_json(cls, raw, where)
-    op.validate(where)
-    return op
-
-
-def op_json(op: LayoutOp) -> dict[str, object]:
-    """``op`` as the JSON object :func:`parse_op` reads."""
-    return {"op": op.op, **to_json(op)}
-
-
-# ---- the digit tuple ---------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -447,7 +373,7 @@ class AxisSplit(NamedTuple):
 
 
 class DigitTuple:
-    """One array's digit tuple while its ops apply: the ops' only state. ``grid`` None = names and shapes
+    """One array's digit tuple while the operations apply. ``grid`` None = names and shapes
     only (an expression is not evaluated, its digit's extent stays unknown)."""
 
     __slots__ = ("digits", "distributed", "grid", "names", "ndim", "where")
@@ -555,7 +481,7 @@ class DigitTuple:
             )
         return AxisSplit(grid_dim, Scheme.CYCLIC if width == 1 else Scheme.BLOCK_CYCLIC, width)
 
-    def lower(self, where: str) -> list[AxisSplit | None]:
+    def lower(self, where: str, array: str) -> list[AxisSplit | None]:
         """Per dimension its split (None = not split); the rank-local digits must end row-major."""
         axes: list[AxisSplit | None] = [None] * self.ndim
         for digit, grid_dim in self.distributed:
@@ -565,197 +491,421 @@ class DigitTuple:
             order = [digit.name for digit in row_major]
             raise ValueError(
                 f"{where}: the rank-local digits {list(self.order())} are not row-major, which is a local relayout "
-                f'and not implemented yet; append {{"op": "permute", "order": {order}}}'
+                f'and not implemented yet; append {{"action": "permute", "array": "{array}", "order": {order}}}'
             )
         return axes
 
 
-def inverse_sequence(ops: Sequence[LayoutOp], ndim: int) -> tuple[LayoutOp, ...]:
-    """The sequence that undoes ``ops`` on an ``ndim``-dimensional array: reversed, each op inverted."""
-    digits = DigitTuple(ndim, None, "inverse")
-    inverses: list[LayoutOp] = []
-    for op in ops:
-        before = digits.order()
-        op.apply(digits)
+# ---- the program state ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ArraySpec:
+    """A kernel array as a request's program starts from it: whole, on the host, row-major, at the
+    problem precision. ``members`` names a struct array's fields (a complex array is ``("re", "im")``)."""
+
+    name: str
+    ndim: int
+    sparse: bool = False
+    members: tuple[str, ...] = ()
+
+
+class ArrayState:
+    """One array while the program runs."""
+
+    __slots__ = ("digits", "format", "location", "members", "name", "precision", "replicated", "sparse", "touched")
+
+    def __init__(
+        self,
+        spec: ArraySpec,
+        grid: Sequence[int] | None,
+        where: str,
+        members: tuple[tuple[str, Precision | None], ...] = (),
+    ) -> None:
+        self.name = spec.name
+        self.sparse = spec.sparse
+        self.digits = DigitTuple(spec.ndim, grid, where)
+        #: A struct's fields with their precisions (None = the problem precision).
+        self.members = members or tuple((member, None) for member in spec.members)
+        self.precision: Precision | None = None
+        self.format: str | None = None
+        self.location: Location | None = None
+        self.replicated = False
+        #: Whether a digit operation, distribute or replicate has touched it.
+        self.touched = False
+
+
+class State:
+    """The arrays a program has made so far, over ``grid`` (None = names and shapes only)."""
+
+    __slots__ = ("applied", "arrays", "grid", "where")
+
+    def __init__(self, arrays: Sequence[ArraySpec], grid: Sequence[int] | None, where: str) -> None:
+        self.grid = None if grid is None else tuple(grid)
+        self.where = where
+        self.arrays = {spec.name: ArrayState(spec, self.grid, where) for spec in arrays}
+        #: The operations applied, in order.
+        self.applied: list[Operation] = []
+
+    def array(self, name: str, op: Operation) -> ArrayState:
+        """Array ``name`` for ``op``: it must exist now, and be dense unless ``op`` applies to sparse arrays."""
+        state = self.arrays.get(name)
+        if state is None:
+            raise ValueError(f"{self.where}: no array {name!r}; the arrays are {sorted(self.arrays)}")
+        if state.sparse and not op.sparse:
+            raise ValueError(f"{self.where}: {op.action.value} applies to dense arrays only; {name!r} is sparse")
+        return state
+
+    def digits(self, name: str, op: Operation) -> DigitTuple:
+        """Array ``name``'s digit tuple, for a digit operation."""
+        state = self.array(name, op)
+        if state.members:
+            raise ValueError(f"{self.where}: {name!r} is a struct; zip or unzip before laying it out")
+        if state.replicated:
+            raise ValueError(f"{self.where}: {name!r} is replicated; a replicated array keeps its layout")
+        state.touched = True
+        state.digits.where = self.where
+        return state.digits
+
+    def fresh(self, name: str) -> None:
+        """Refuse ``name`` for a new array when it is taken."""
+        if name in self.arrays:
+            raise ValueError(f"{self.where}: an array {name!r} exists already")
+
+    def untouched(self, name: str, op: Operation) -> ArrayState:
+        """Array ``name`` before any layout: zip and unzip regroup whole arrays."""
+        state = self.array(name, op)
+        if state.touched:
+            raise ValueError(f"{self.where}: {op.action.value} regroups whole arrays; {name!r} is already laid out")
+        return state
+
+
+def run(operations: Sequence[Operation], arrays: Sequence[ArraySpec], grid: Sequence[int] | None, where: str) -> State:
+    """Run ``operations`` top to bottom over ``arrays``: each sees what the previous ones left, and the
+    first that cannot apply is a request fault naming its entry."""
+    state = State(arrays, grid, where)
+    for index, op in enumerate(operations):
+        state.where = f"{where}[{index}] ({op.action.value})"
+        op.apply(state)
+        state.applied.append(op)
+    return state
+
+
+def lower(state: State) -> dict[str, list[AxisSplit | None] | None]:
+    """Each laid-out array's split per dimension (None = replicated) from a run over a grid; an array no
+    operation laid out is left out. An operation that does not lower yet is refused by name."""
+    refused = next((op for op in state.applied if not op.lowers), None)
+    if refused is not None:
+        lowered = ", ".join(action.value for action, cls in OPERATIONS.entries.items() if cls.lowers)
+        raise ValueError(f"{refused.action.value} is not implemented yet (only {lowered} lower today)")
+    out: dict[str, list[AxisSplit | None] | None] = {}
+    for name, array in state.arrays.items():
+        if array.replicated:
+            out[name] = None
+        elif array.touched:
+            out[name] = array.digits.lower(f"array {name!r}", name)
+    return out
+
+
+def inverse_sequence(operations: Sequence[Operation], ndim: int) -> tuple[Operation, ...]:
+    """The operations that undo the digit operations ``operations`` on one ``ndim``-dimensional array:
+    reversed, each inverted against the digit names before it."""
+    names = {op.array for op in operations if isinstance(op, DigitOperation)}
+    if len(names) != 1 or not all(isinstance(op, DigitOperation) for op in operations):
+        raise ValueError("inverse_sequence inverts the digit operations of one array")
+    (array,) = names
+    state = State([ArraySpec(array, ndim)], None, "inverse")
+    inverses: list[Operation] = []
+    for op in operations:
+        before = state.arrays[array].digits.order()
+        op.apply(state)
         inverses.append(op.inverse(before))
     return tuple(reversed(inverses))
 
 
-# ---- the layout ops ----------------------------------------------------------------------------------
+# ---- the operations ----------------------------------------------------------------------------------
 
 
-@layout_op
+@operation
 @dataclass(frozen=True, slots=True)
-class Block(LayoutOp):
+class Cast(Operation):
+    """Change array ``array``'s element type to ``to``; the judge converts it in before the call and out
+    after it."""
+
+    action: ClassVar[Action] = Action.CAST
+    array: ArrayName
+    to: Precision
+
+    def apply(self, state: State) -> None:
+        target = state.array(self.array, self)
+        if target.members:
+            raise ValueError(f"{state.where}: {self.array!r} is a struct; cast its fields before zipping them")
+        target.precision = self.to
+
+
+@operation
+@dataclass(frozen=True, slots=True)
+class Format(Operation):
+    """Store sparse array ``array`` in format ``to``."""
+
+    action: ClassVar[Action] = Action.FORMAT
+    sparse: ClassVar[bool] = True
+    array: ArrayName
+    to: FormatLabel
+
+    def apply(self, state: State) -> None:
+        target = state.array(self.array, self)
+        if not target.sparse:
+            raise ValueError(f"{state.where}: format applies to sparse arrays; {self.array!r} is dense")
+        target.format = self.to
+
+
+@operation
+@dataclass(frozen=True, slots=True)
+class Zip(Operation):
+    """Fuse whole arrays ``arrays`` of one shape into one array ``into`` of structs, one member per array
+    in order, each keeping its precision."""
+
+    action: ClassVar[Action] = Action.ZIP
+    lowers: ClassVar[bool] = False
+    arrays: ArrayNames
+    into: ArrayName
+
+    def apply(self, state: State) -> None:
+        fields = [state.untouched(name, self) for name in self.arrays]
+        if any(field.members for field in fields):
+            raise ValueError(f"{state.where}: a zip fuses plain arrays; unzip a struct first")
+        ndims = {field.digits.ndim for field in fields}
+        if len(ndims) != 1:
+            raise ValueError(f"{state.where}: zipped arrays must have one shape; {list(self.arrays)} do not")
+        state.fresh(self.into)
+        for name in self.arrays:
+            del state.arrays[name]
+        spec = ArraySpec(self.into, ndims.pop())
+        state.arrays[self.into] = ArrayState(
+            spec, state.grid, state.where, tuple((field.name, field.precision) for field in fields)
+        )
+
+
+@operation
+@dataclass(frozen=True, slots=True)
+class Unzip(Operation):
+    """Split the whole struct array ``array`` into one array per member, named ``into`` in member order,
+    each keeping its member's precision. A complex array is the struct ``(re, im)``."""
+
+    action: ClassVar[Action] = Action.UNZIP
+    lowers: ClassVar[bool] = False
+    array: ArrayName
+    into: ArrayNames
+
+    def apply(self, state: State) -> None:
+        struct = state.untouched(self.array, self)
+        if len(struct.members) != len(self.into):
+            raise ValueError(
+                f"{state.where}: {self.array!r} has {len(struct.members)} member(s) "
+                f"{[m for m, _ in struct.members]}; name one array per member"
+            )
+        del state.arrays[self.array]
+        for name, (_member, precision) in zip(self.into, struct.members, strict=True):
+            state.fresh(name)
+            state.arrays[name] = ArrayState(ArraySpec(name, struct.digits.ndim), state.grid, state.where)
+            state.arrays[name].precision = precision
+
+
+class DigitOperation(Operation):
+    """An operation on one array's digits; the inverse of each is another digit operation."""
+
+    __slots__ = ()
+    array: ArrayName
+
+
+@operation
+@dataclass(frozen=True, slots=True)
+class Block(DigitOperation):
     """Cut digit ``digit`` ``(d, s, e)`` into ``into``: coarse ``(d, s*b, ceil(e/b))`` and fine ``(d, s, b)``."""
 
-    op: ClassVar[str] = "block"
+    action: ClassVar[Action] = Action.BLOCK
+    array: ArrayName
     digit: DigitName
     factor: Expr
     into: DigitPair
 
-    def apply(self, digits: DigitTuple) -> None:
+    def apply(self, state: State) -> None:
+        digits = state.digits(self.array, self)
         digits.block(self.digit, digits.eval(self.factor), self.into)
 
     def inverse(self, before: tuple[str, ...]) -> "Unblock":
-        return Unblock(self.into, self.factor, self.digit)
+        return Unblock(self.array, self.into, self.factor, self.digit)
 
 
-@layout_op
+@operation
 @dataclass(frozen=True, slots=True)
-class Unblock(LayoutOp):
+class Unblock(DigitOperation):
     """Merge the coarse and fine digits ``digits`` of a ``block`` by ``factor`` back into one digit ``into``."""
 
-    op: ClassVar[str] = "unblock"
+    action: ClassVar[Action] = Action.UNBLOCK
+    array: ArrayName
     digits: DigitPair
     factor: Expr
     into: DigitName
 
-    def apply(self, digits: DigitTuple) -> None:
+    def apply(self, state: State) -> None:
+        digits = state.digits(self.array, self)
         fine = digits.digits[digits.find(self.digits[1])]
         factor = digits.eval(self.factor)
         if factor is not None and fine.extent != factor:
-            raise ValueError(f"{digits.where}: {self.digits[1]!r} has extent {fine.extent}, not the factor {factor}")
+            raise ValueError(f"{state.where}: {self.digits[1]!r} has extent {fine.extent}, not the factor {factor}")
         digits.merge(self.digits, self.into, band=False)
 
     def inverse(self, before: tuple[str, ...]) -> Block:
-        return Block(self.into, self.factor, self.digits)
+        return Block(self.array, self.into, self.factor, self.digits)
 
 
-@layout_op
+@operation
 @dataclass(frozen=True, slots=True)
-class Split(LayoutOp):
-    """Cut a whole dimension's digit ``digit`` into ``parts`` load-balanced contiguous bands (sizes differ by
-    at most one): ``into`` names the band index (extent ``parts``) and the index within the band."""
+class Split(DigitOperation):
+    """Cut a whole dimension's digit ``digit`` into ``parts`` contiguous load-balanced bands (sizes differ
+    by at most one): ``into`` names the band index (extent ``parts``) and the index within the band."""
 
-    op: ClassVar[str] = "split"
+    action: ClassVar[Action] = Action.SPLIT
+    array: ArrayName
     digit: DigitName
     parts: Expr
     into: DigitPair
 
-    def apply(self, digits: DigitTuple) -> None:
+    def apply(self, state: State) -> None:
+        digits = state.digits(self.array, self)
         digits.split(self.digit, digits.eval(self.parts), self.into)
 
     def inverse(self, before: tuple[str, ...]) -> "Unsplit":
-        return Unsplit(self.into, self.parts, self.digit)
+        return Unsplit(self.array, self.into, self.parts, self.digit)
 
 
-@layout_op
+@operation
 @dataclass(frozen=True, slots=True)
-class Unsplit(LayoutOp):
+class Unsplit(DigitOperation):
     """Merge the band index and the index within the band ``digits`` of a ``split`` back into one digit."""
 
-    op: ClassVar[str] = "unsplit"
+    action: ClassVar[Action] = Action.UNSPLIT
+    array: ArrayName
     digits: DigitPair
     parts: Expr
     into: DigitName
 
-    def apply(self, digits: DigitTuple) -> None:
-        digits.merge(self.digits, self.into, band=True)
+    def apply(self, state: State) -> None:
+        state.digits(self.array, self).merge(self.digits, self.into, band=True)
 
     def inverse(self, before: tuple[str, ...]) -> Split:
-        return Split(self.into, self.parts, self.digits)
+        return Split(self.array, self.into, self.parts, self.digits)
 
 
-@layout_op
+@operation
 @dataclass(frozen=True, slots=True)
-class Permute(LayoutOp):
-    """Reorder the digit tuple to ``order``, every current digit named once."""
+class Permute(DigitOperation):
+    """Reorder array ``array``'s digit tuple to ``order``, every current digit named once."""
 
-    op: ClassVar[str] = "permute"
+    action: ClassVar[Action] = Action.PERMUTE
+    array: ArrayName
     order: DigitNames
 
-    def apply(self, digits: DigitTuple) -> None:
+    def apply(self, state: State) -> None:
+        digits = state.digits(self.array, self)
         if sorted(self.order) != sorted(digits.order()):
             raise ValueError(
-                f"{digits.where}: permute must name every digit once; the digits are {list(digits.order())}"
+                f"{state.where}: permute must name every digit once; the digits are {list(digits.order())}"
             )
         digits.digits[:] = [digits.digits[digits.find(name)] for name in self.order]
 
     def inverse(self, before: tuple[str, ...]) -> "Permute":
-        return Permute(DigitNames(before))
+        return Permute(self.array, DigitNames(before))
 
 
-@layout_op
+@operation
 @dataclass(frozen=True, slots=True)
-class Pad(LayoutOp):
+class Pad(DigitOperation):
     """Grow digit ``digit`` by ``amount`` dead cells."""
 
-    op: ClassVar[str] = "pad"
+    action: ClassVar[Action] = Action.PAD
     lowers: ClassVar[bool] = False
+    array: ArrayName
     digit: DigitName
     amount: Expr
 
-    def apply(self, digits: DigitTuple) -> None:
-        digits.find(self.digit)
+    def apply(self, state: State) -> None:
+        state.digits(self.array, self).find(self.digit)
 
     def inverse(self, before: tuple[str, ...]) -> "Unpad":
-        return Unpad(self.digit, self.amount)
+        return Unpad(self.array, self.digit, self.amount)
 
 
-@layout_op
+@operation
 @dataclass(frozen=True, slots=True)
-class Unpad(LayoutOp):
+class Unpad(DigitOperation):
     """Drop ``amount`` dead cells from digit ``digit``."""
 
-    op: ClassVar[str] = "unpad"
+    action: ClassVar[Action] = Action.UNPAD
     lowers: ClassVar[bool] = False
+    array: ArrayName
     digit: DigitName
     amount: Expr
 
-    def apply(self, digits: DigitTuple) -> None:
-        digits.find(self.digit)
+    def apply(self, state: State) -> None:
+        state.digits(self.array, self).find(self.digit)
 
     def inverse(self, before: tuple[str, ...]) -> Pad:
-        return Pad(self.digit, self.amount)
+        return Pad(self.array, self.digit, self.amount)
 
 
-@layout_op
+@operation
 @dataclass(frozen=True, slots=True)
-class Shuffle(LayoutOp):
+class Shuffle(DigitOperation):
     """Renumber the digits ``digits`` by the bijection ``f`` (one expression per digit, over their names);
-    the agent supplies its inverse ``f_inv``, checked exhaustively before the build."""
+    the caller supplies its inverse ``f_inv``, checked exhaustively before the build."""
 
-    op: ClassVar[str] = "shuffle"
+    action: ClassVar[Action] = Action.SHUFFLE
     lowers: ClassVar[bool] = False
+    array: ArrayName
     digits: DigitNames
     f: IndexExprs
     f_inv: IndexExprs
 
-    def validate(self, where: str) -> None:
+    def validate(self) -> None:
         if not len(self.f) == len(self.f_inv) == len(self.digits):
-            raise ValueError(f"{where}: f and f_inv need one expression per shuffled digit ({len(self.digits)})")
+            raise ValueError(f"f and f_inv need one expression per shuffled digit ({len(self.digits)})")
 
-    def apply(self, digits: DigitTuple) -> None:
+    def apply(self, state: State) -> None:
+        digits = state.digits(self.array, self)
         for name in self.digits:
             digits.find(name)
 
     def inverse(self, before: tuple[str, ...]) -> "Shuffle":
-        return Shuffle(self.digits, self.f_inv, self.f)
+        return Shuffle(self.array, self.digits, self.f_inv, self.f)
 
 
-@layout_op
+@operation
 @dataclass(frozen=True, slots=True)
-class LinearShuffle(LayoutOp):
+class LinearShuffle(DigitOperation):
     """Renumber the digits ``digits`` (extents ``2**bits``) by an invertible linear map over GF(2) on their
     bits (Linear Layouts, arXiv:2505.23819): the input bit vector is each digit's bits, least significant
     first, in ``digits`` order. XOR swizzles are this form; the inverse is the inverse matrix."""
 
-    op: ClassVar[str] = "linear_shuffle"
+    action: ClassVar[Action] = Action.LINEAR_SHUFFLE
     lowers: ClassVar[bool] = False
+    array: ArrayName
     digits: DigitNames
     bits: Bits
     matrix: BitMatrix
 
-    def validate(self, where: str) -> None:
+    def validate(self) -> None:
         if len(self.bits) != len(self.digits):
-            raise ValueError(f"{where}: bits needs one width per shuffled digit ({len(self.digits)})")
+            raise ValueError(f"bits needs one width per shuffled digit ({len(self.digits)})")
         if len(self.matrix) != sum(self.bits):
-            raise ValueError(f"{where}: the matrix must be {sum(self.bits)} x {sum(self.bits)} (sum of bits)")
+            raise ValueError(f"the matrix must be {sum(self.bits)} x {sum(self.bits)} (sum of bits)")
         if gf2_inverse(self.matrix) is None:
-            raise ValueError(f"{where}: the matrix is singular over GF(2), so the shuffle is not a bijection")
+            raise ValueError("the matrix is singular over GF(2), so the shuffle is not a bijection")
 
-    def apply(self, digits: DigitTuple) -> None:
+    def apply(self, state: State) -> None:
+        digits = state.digits(self.array, self)
         for name in self.digits:
             digits.find(name)
 
@@ -763,24 +913,96 @@ class LinearShuffle(LayoutOp):
         inverse = gf2_inverse(self.matrix)
         if inverse is None:
             raise ValueError("a singular GF(2) matrix has no inverse")
-        return LinearShuffle(self.digits, self.bits, BitMatrix(inverse))
+        return LinearShuffle(self.array, self.digits, self.bits, BitMatrix(inverse))
 
 
-@layout_op
+@operation
 @dataclass(frozen=True, slots=True)
-class Distribute(LayoutOp):
-    """Hand digit ``digit`` (extent ``P_g``) to grid dimension ``grid_dim``: it becomes the rank coordinate
-    and leaves the local tuple."""
+class Distribute(DigitOperation):
+    """Hand a digit of extent ``P_g`` to grid dimension ``grid_dim``: it becomes the rank coordinate and
+    leaves the local tuple. Name the ``digit``, or use the short form ``dim`` + ``scheme`` (+ ``block_size``
+    for ``block_cyclic``), which cuts dimension ``dim``'s whole digit and distributes the rank digit
+    ``r<dim>``: ``block`` = contiguous balanced bands, ``cyclic`` = round robin, ``block_cyclic`` = round robin
+    of blocks of ``block_size``."""
 
-    op: ClassVar[str] = "distribute"
-    digit: DigitName
+    action: ClassVar[Action] = Action.DISTRIBUTE
+    array: ArrayName
     grid_dim: GridDim
+    digit: DigitName | None = None
+    dim: Dim | None = None
+    scheme: Scheme | None = None
+    block_size: Width | None = None
 
-    def apply(self, digits: DigitTuple) -> None:
-        digits.distribute(self.digit, self.grid_dim)
+    def validate(self) -> None:
+        if (self.digit is None) == (self.dim is None and self.scheme is None):
+            raise ValueError("name either the digit, or the dim and scheme of the short form")
+        if self.digit is None and (self.dim is None or self.scheme is None):
+            raise ValueError("the short form needs both dim and scheme")
+        if (self.block_size is not None) != (self.scheme is Scheme.BLOCK_CYCLIC):
+            raise ValueError("block_size goes with scheme block_cyclic, and only with it")
+
+    def apply(self, state: State) -> None:
+        if self.digit is not None:
+            state.digits(self.array, self).distribute(self.digit, self.grid_dim)
+            return
+        for op in self.expanded(state):
+            op.apply(state)
+
+    def expanded(self, state: State) -> list[DigitOperation]:
+        """The short form's primitive operations on dimension ``dim``'s whole digit."""
+        dim = self.dim if self.dim is not None else 0
+        digits = state.digits(self.array, self)
+        whole = [d.name for d in digits.digits if d.dim == dim and d.extent is None and d.stride == 1 and not d.band]
+        own = [d for d in digits.digits if d.dim == dim]
+        if dim >= digits.ndim or len(own) != 1 or not whole:
+            raise ValueError(f"{state.where}: the short form distributes a whole dimension; dimension {dim} is not one")
+        name, rank, symbol = whole[0], f"r{dim}", GRID_SYMBOL.format(self.grid_dim)
+        array, into = ArrayName(self.array), DigitName(rank)
+        if self.scheme is Scheme.BLOCK:
+            cuts: list[DigitOperation] = [Split(array, DigitName(name), Expr(symbol), DigitPair((rank, name)))]
+        elif self.scheme is Scheme.CYCLIC:
+            cuts = [Block(array, DigitName(name), Expr(symbol), DigitPair((name, rank)))]
+        else:
+            cycle, width = f"c{dim}", self.block_size or 1
+            cuts = [
+                Block(array, DigitName(name), Expr(f"{width}*{symbol}"), DigitPair((name, cycle))),
+                Block(array, DigitName(cycle), Expr(str(width)), DigitPair((rank, f"b{dim}"))),
+            ]
+        return [*cuts, Distribute(array, self.grid_dim, digit=into)]
 
     def inverse(self, before: tuple[str, ...]) -> NoReturn:
-        raise ValueError("a distribute is undone by the gather; invert the sequence before it")
+        raise ValueError("a distribute is undone by the gather; invert the operations before it")
+
+
+@operation
+@dataclass(frozen=True, slots=True)
+class Replicate(Operation):
+    """Hold array ``array`` whole on every rank."""
+
+    action: ClassVar[Action] = Action.REPLICATE
+    sparse: ClassVar[bool] = True
+    array: ArrayName
+
+    def apply(self, state: State) -> None:
+        target = state.array(self.array, self)
+        if target.digits.distributed:
+            raise ValueError(f"{state.where}: {self.array!r} is distributed; it cannot also be replicated")
+        target.replicated = True
+        target.touched = True
+
+
+@operation
+@dataclass(frozen=True, slots=True)
+class Place(Operation):
+    """Keep array ``array`` in ``on`` memory (``host`` or ``device``) during the call."""
+
+    action: ClassVar[Action] = Action.PLACE
+    sparse: ClassVar[bool] = True
+    array: ArrayName
+    on: Location
+
+    def apply(self, state: State) -> None:
+        state.array(self.array, self).location = self.on
 
 
 def gf2_inverse(matrix: Sequence[Sequence[int]]) -> tuple[tuple[int, ...], ...] | None:
@@ -798,124 +1020,97 @@ def gf2_inverse(matrix: Sequence[Sequence[int]]) -> tuple[tuple[int, ...], ...] 
     return tuple(tuple(row[n:]) for row in rows)
 
 
-# ---- the group ops -----------------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class GroupOp:
-    """One op that turns several arrays into one or one into several. Requested as ``{name: [fields]}``
-    under its own key; it has no inverse: each direction is its own request."""
-
-    op: ClassVar[str]
-    name: str
-    fields: tuple[str, ...]
-
-
-#: Request key -> the group op class.
-GROUP_OPS: Registry[type[GroupOp]] = Registry("group op")
-
-
-def group_op[C: type[GroupOp]](cls: C) -> C:
-    """Register a group op class under its ``op`` name, which is also its request key."""
-    GROUP_OPS.add(cls.op, cls)
-    return cls
-
-
-@group_op
-@dataclass(frozen=True, slots=True)
-class Zip(GroupOp):
-    """Fuse ``fields`` (arrays of one logical shape) into one array ``name`` of C structs, one member per
-    field in order, each at its own (requested) precision."""
-
-    op: ClassVar[str] = "zip"
-
-
-@group_op
-@dataclass(frozen=True, slots=True)
-class Unzip(GroupOp):
-    """Split the struct array ``name`` into one array per member, named ``fields`` in member order. A
-    complex array is the struct ``(re, im)``."""
-
-    op: ClassVar[str] = "unzip"
-
-
-def groups_from_json(key: str, raw: object, where: str) -> list[GroupOp]:
-    """The ``{name: [fields]}`` object of group op ``key``."""
-    cls = GROUP_OPS.entries[key]
-    if not isinstance(raw, dict):
-        raise ValueError(f"{where} must be an object {{name: [two or more arrays]}}; got {raw!r}")
-    groups: list[GroupOp] = []
-    for name, fields in raw.items():
-        if not isinstance(fields, list) or len(fields) < 2 or not all(isinstance(f, str) and f for f in fields):
-            raise ValueError(f"{where}[{name!r}] must be a list of two or more arrays; got {fields!r}")
-        if len(set(fields)) != len(fields):
-            raise ValueError(f"{where}[{name!r}] names an array twice: {fields!r}")
-        groups.append(cls(str(name), tuple(fields)))
-    return groups
-
-
-def groups_json(groups: Sequence[GroupOp]) -> dict[str, dict[str, list[str]]]:
-    """``groups`` as ``{key: {name: [fields]}}``, one entry per requested key."""
-    out: dict[str, dict[str, list[str]]] = {}
-    for group in groups:
-        out.setdefault(group.op, {})[group.name] = list(group.fields)
-    return out
-
-
-# ---- lowering ----------------------------------------------------------------------------------------
-
-
-def lower_layout(ops: Sequence[LayoutOp], ndim: int, grid: Sequence[int], where: str) -> list[AxisSplit | None]:
-    """Lower one array's op sequence over ``grid`` to its per-dimension split (None = not split), or raise
-    the request fault that says why it cannot be (yet).
-
-    Lowerable: blocks, splits, their inverses and permutes, then distributes of a split's band index
-    (``block``, contiguous bands) or of a digit of extent ``P_g`` sitting between a coarse digit of stride
-    ``s*P_g`` and, when ``s > 1``, a fine digit of extent ``s`` (``block_cyclic`` of width ``s``; ``cyclic``
-    at ``s == 1``). The rank-local digits must end in row-major order."""
-    refused = next((k for k, op in enumerate(ops) if not op.lowers), None)
-    if refused is not None:
-        lowered = ", ".join(key for key in LAYOUT_OPS.keys() if LAYOUT_OPS.entries[key].lowers)
-        raise ValueError(
-            f"{where}[{refused}]: layout op {ops[refused].op!r} is not implemented yet (only {lowered} lower today)"
-        )
-    digits = DigitTuple(ndim, grid, where)
-    for index, op in enumerate(ops):
-        digits.where = f"{where}[{index}]"
-        op.apply(digits)
-    return digits.lower(where)
+# ---- defaults and the request ------------------------------------------------------------------------
 
 
 def normal_split(axis: AxisSplit) -> AxisSplit:
-    """The split :func:`lower_layout` gives back for ``axis``: block and cyclic carry width 1, and a
-    block-cyclic of width 1 is cyclic."""
+    """The split :func:`lower` gives back for ``axis``: block and cyclic carry width 1, and a block-cyclic
+    of width 1 is cyclic."""
     scheme = Scheme.CYCLIC if axis.scheme is Scheme.BLOCK_CYCLIC and axis.block_size == 1 else axis.scheme
     return AxisSplit(axis.grid_dim, scheme, axis.block_size if scheme is Scheme.BLOCK_CYCLIC else 1)
 
 
-def ops_for_axes(axes: Sequence[AxisSplit | None]) -> tuple[LayoutOp, ...]:
-    """The op sequence whose lowering is ``axes`` (None = not split): the inverse of :func:`lower_layout`,
-    used to show a kernel's default layout. Dimension ``d``'s rank digit is ``r<d>``; it is lowered back on
-    a grid of 2s as a self-check."""
+def operations_for_axes(array: str, axes: Sequence[AxisSplit | None]) -> tuple[Operation, ...]:
+    """The operations whose lowering is ``axes`` for ``array`` (None = not split; all None = replicated):
+    one short-form ``distribute`` per split dimension, lowered back on a grid of 2s as a self-check."""
     normal = [None if axis is None else normal_split(axis) for axis in axes]
-    ops: list[LayoutOp] = []
-    for dim, axis in enumerate(normal):
-        if axis is None:
-            continue
-        whole, rank, symbol = DIM_DIGIT.format(dim), f"r{dim}", GRID_SYMBOL.format(axis.grid_dim)
-        if axis.scheme is Scheme.BLOCK:
-            ops.append(Split(DigitName(whole), Expr(symbol), DigitPair((rank, whole))))
-        elif axis.scheme is Scheme.CYCLIC:
-            ops.append(Block(DigitName(whole), Expr(symbol), DigitPair((whole, rank))))
-        else:
-            cycle, width = f"c{dim}", f"b{dim}"
-            ops += [
-                Block(DigitName(whole), Expr(f"{axis.block_size}*{symbol}"), DigitPair((whole, cycle))),
-                Block(DigitName(cycle), Expr(str(axis.block_size)), DigitPair((rank, width))),
-            ]
-        ops.append(Distribute(DigitName(rank), GridDim(axis.grid_dim)))
-    sample = [2] * (1 + max((axis.grid_dim for axis in normal if axis is not None), default=0))
-    lowered = lower_layout(ops, len(axes), sample, "default layout")
-    if lowered != normal:
-        raise AssertionError(f"ops_for_axes({list(axes)}) lowers to {lowered}")
-    return tuple(ops)
+    if all(axis is None for axis in normal):
+        return (Replicate(ArrayName(array)),)
+    ops = tuple(
+        Distribute(
+            ArrayName(array),
+            GridDim(axis.grid_dim),
+            dim=Dim(dim),
+            scheme=axis.scheme,
+            block_size=Width(axis.block_size) if axis.scheme is Scheme.BLOCK_CYCLIC else None,
+        )
+        for dim, axis in enumerate(normal)
+        if axis is not None
+    )
+    sample = [2] * (1 + max(axis.grid_dim for axis in normal if axis is not None))
+    lowered = lower(run(ops, [ArraySpec(array, len(axes))], sample, "default layout"))
+    if lowered[array] != normal:
+        raise AssertionError(f"operations_for_axes({array!r}, {list(axes)}) lowers to {lowered[array]}")
+    return ops
+
+
+@dataclass(frozen=True, slots=True)
+class Startup:
+    """What a request settles before any array is touched: the libraries to ``load`` and the processor
+    ``grid``'s extents over the rank count ``P`` (None = not a distributed run)."""
+
+    load: tuple[str, ...] = ()
+    grid: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Requests:
+    """A request: its :class:`Startup` and its ``operations``, run top to bottom (:func:`run`)."""
+
+    startup: Startup = field(default_factory=Startup)
+    operations: tuple[Operation, ...] = ()
+
+    @property
+    def distributed(self) -> bool:
+        """Whether this asks for a distributed run: it names a grid."""
+        return self.startup.grid is not None
+
+    def grid_at(self, ranks: int) -> tuple[int, ...] | None:
+        """The grid's extents at ``ranks`` ranks; None when there is no grid or it does not span ``ranks``."""
+        grid = self.startup.grid
+        return None if grid is None else grid_extents(grid, ranks, "startup.grid")
+
+    def run(self, arrays: Sequence[ArraySpec], ranks: int | None = None) -> State:
+        """The operations run over ``arrays``, on the grid at ``ranks`` ranks (None = names and shapes only)."""
+        grid = None
+        if ranks is not None:
+            if self.startup.grid is None:
+                raise ValueError("operations distribute nothing without startup.grid")
+            grid = self.grid_at(ranks)
+            if grid is None:
+                raise ValueError(f"startup.grid {list(self.startup.grid)} does not span {ranks} rank(s)")
+        return run(self.operations, arrays, grid, "operations")
+
+    def named(self) -> set[str]:
+        """Every array name an operation names."""
+        names: set[str] = set()
+        for op in self.operations:
+            values = dataclasses.asdict(op)  # type: ignore[call-overload]  # every operation is a dataclass
+            for spec in dataclasses.fields(op):  # type: ignore[arg-type]
+                if spec.type is ArrayName:
+                    names.add(values[spec.name])
+                elif spec.type is ArrayNames:
+                    names.update(values[spec.name])
+        return names
+
+    def precisions(self) -> dict[str, Precision]:
+        """Each array a ``cast`` names, with the precision its last cast leaves."""
+        return {op.array: op.to for op in self.operations if isinstance(op, Cast)}
+
+    def formats(self) -> dict[str, str]:
+        """Each sparse array a ``format`` names, with the format its last one leaves."""
+        return {op.array: op.to for op in self.operations if isinstance(op, Format)}
+
+    def locations(self) -> dict[str, Location]:
+        """Each array a ``place`` names, with the memory its last one leaves."""
+        return {op.array: op.on for op in self.operations if isinstance(op, Place)}

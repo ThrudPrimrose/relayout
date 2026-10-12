@@ -1,8 +1,10 @@
 # Copyright 2026 ETH Zurich and the relayout authors.
-"""Layout op sequences: the registry, JSON, inverses, the grid and the lowering to one split per dimension.
+"""The operations a request runs: their effect top to bottom, the grid, and the lowering to one split
+per distributed dimension.
 
-The kernel's default distribution is shown as an op list (``ops_for_axes``), so lowering that list
-must give the default back; a sequence the lowering does not cover is refused by name.
+A kernel's default distribution is shown as short-form ``distribute`` operations
+(``operations_for_axes``), so lowering them must give the default back; a program the lowering does
+not cover is refused by name.
 """
 
 import itertools
@@ -10,25 +12,35 @@ import itertools
 import pytest
 
 from relayout.ops import (
-    GROUP_OPS,
-    LAYOUT_OPS,
+    ArraySpec,
     AxisSplit,
+    Block,
+    Cast,
     Distribute,
+    Format,
     LinearShuffle,
+    Location,
+    Pad,
+    Permute,
+    Place,
+    Precision,
+    Replicate,
+    Requests,
     Scheme,
+    Shuffle,
+    Split,
+    Startup,
+    Unblock,
+    Unsplit,
     Unzip,
     Zip,
     eval_index,
     gf2_inverse,
     grid_extents,
-    groups_from_json,
-    groups_json,
     inverse_sequence,
-    lower_layout,
-    op_json,
-    ops_for_axes,
-    parse_grid,
-    parse_op,
+    lower,
+    operations_for_axes,
+    run,
 )
 
 AXES = (
@@ -39,137 +51,160 @@ AXES = (
     AxisSplit(1, Scheme.BLOCK, 1),
     AxisSplit(1, Scheme.BLOCK_CYCLIC, 3),
 )
+A2 = [ArraySpec("A", 2)]
 
 
-def distribute(digit: str, grid_dim: int = 0) -> dict[str, object]:
-    return {"op": "distribute", "digit": digit, "grid_dim": grid_dim}
+def lowered(ops: list, arrays: list[ArraySpec], grid: list[int]) -> dict:
+    return lower(run(ops, arrays, grid, "operations"))
 
 
-def block(digit: str, factor: int | str, into: list[str]) -> dict[str, object]:
-    return {"op": "block", "digit": digit, "factor": factor, "into": into}
+def test_the_three_schemes_lower_from_their_primitive_operations() -> None:
+    bands = [Split("A", "i0", "P0", ("r", "i0")), Distribute("A", 0, digit="r")]
+    assert lowered(bands, A2, [4]) == {"A": [AxisSplit(0, Scheme.BLOCK, 1), None]}
+    cyclic = [Block("A", "i1", "P0", ("i1", "r")), Distribute("A", 0, digit="r")]
+    assert lowered(cyclic, A2, [4]) == {"A": [None, AxisSplit(0, Scheme.CYCLIC, 1)]}
+    blocked = [Block("A", "i0", "8*P0", ("i0", "c")), Block("A", "c", "8", ("r", "b")), Distribute("A", 0, digit="r")]
+    assert lowered(blocked, A2, [4]) == {"A": [AxisSplit(0, Scheme.BLOCK_CYCLIC, 8), None]}
 
 
-def split(digit: str, parts: int | str, into: list[str]) -> dict[str, object]:
-    return {"op": "split", "digit": digit, "parts": parts, "into": into}
-
-
-def lowered(ops: list[dict[str, object]], ndim: int, grid: list[int]) -> list[AxisSplit | None]:
-    return lower_layout([parse_op(op, "t") for op in ops], ndim, grid, "t")
-
-
-def test_the_three_schemes_lower_from_their_op_sequences() -> None:
-    assert lowered([split("i0", "P0", ["r", "i0"]), distribute("r")], 2, [4]) == [AxisSplit(0, Scheme.BLOCK, 1), None]
-    assert lowered([block("i1", "P0", ["i1", "r"]), distribute("r")], 2, [4]) == [
-        None,
-        AxisSplit(0, Scheme.CYCLIC, 1),
-    ]
-    blocked = [block("i0", "8*P0", ["i0", "c"]), block("c", 8, ["r", "b"]), distribute("r")]
-    assert lowered(blocked, 2, [4]) == [AxisSplit(0, Scheme.BLOCK_CYCLIC, 8), None]
+def test_the_short_form_is_the_primitive_operations() -> None:
+    """``distribute dim scheme`` cuts the whole dimension and distributes its rank digit ``r<dim>``."""
+    for scheme, width, split in (
+        (Scheme.BLOCK, None, AxisSplit(0, Scheme.BLOCK, 1)),
+        (Scheme.CYCLIC, None, AxisSplit(0, Scheme.CYCLIC, 1)),
+        (Scheme.BLOCK_CYCLIC, 4, AxisSplit(0, Scheme.BLOCK_CYCLIC, 4)),
+    ):
+        short = Distribute("A", 0, dim=0, scheme=scheme, block_size=width)
+        assert lowered([short], A2, [2]) == {"A": [split, None]}
 
 
 def test_a_grid_factor_re_evaluates_at_every_rank_count() -> None:
     """One request stays valid when a scaling run re-sizes the grid: ``P0`` is read at each P."""
-    ops = [block("i0", "2*P0", ["i0", "c"]), block("c", 2, ["r", "b"]), distribute("r")]
+    ops = [Block("A", "i0", "2*P0", ("i0", "c")), Block("A", "c", "2", ("r", "b")), Distribute("A", 0, digit="r")]
     for p in (1, 2, 4, 8):
-        assert lowered(ops, 1, [p]) == [AxisSplit(0, Scheme.BLOCK_CYCLIC, 2)]
+        assert lowered(ops, [ArraySpec("A", 1)], [p]) == {"A": [AxisSplit(0, Scheme.BLOCK_CYCLIC, 2)]}
 
 
 def test_a_grid_is_extents_over_the_rank_count() -> None:
     """A square grid spans only the square rank counts; a 1-D grid every one."""
-    square = parse_grid(["root(P, 2)", "root(P, 2)"], "grid")
-    assert grid_extents(square, 16, "grid") == (4, 4)
-    assert grid_extents(square, 8, "grid") is None
-    assert grid_extents(parse_grid(["P // 2", 2], "grid"), 8, "grid") == (4, 2)
-    assert grid_extents(parse_grid(["P"], "grid"), 3, "grid") == (3,)
+    square = Requests(Startup(grid=("root(P, 2)", "root(P, 2)")))
+    assert square.grid_at(16) == (4, 4)
+    assert square.grid_at(8) is None
+    assert grid_extents(("P // 2", "2"), 8, "grid") == (4, 2)
     with pytest.raises(ValueError, match="extent below 1"):
-        grid_extents(parse_grid(["P // 2", 2], "grid"), 1, "grid")
+        grid_extents(("P // 2", "2"), 1, "grid")
+    with pytest.raises(ValueError, match="does not span 8 rank"):
+        square.run(A2, 8)
 
 
 @pytest.mark.parametrize("ndim", [1, 2, 3])
-def test_the_default_layout_raises_to_ops_that_lower_back(ndim: int) -> None:
-    """``ops_for_axes`` is what an agent is shown; lowering it must be the descriptor it came from."""
+def test_the_default_layout_raises_to_operations_that_lower_back(ndim: int) -> None:
+    """``operations_for_axes`` is what a caller is shown; lowering it must be the split it came from."""
     for axes in itertools.product(AXES, repeat=ndim):
         grid_dims = [axis.grid_dim for axis in axes if axis is not None]
         if len(grid_dims) != len(set(grid_dims)):
             continue
-        ops = ops_for_axes(axes)
+        ops = operations_for_axes("A", axes)
         for grid in ([1, 1], [2, 3], [4, 4]):
-            assert lower_layout(ops, ndim, grid, "t") == list(axes), (axes, grid)
+            expected = None if all(a is None for a in axes) else list(axes)
+            assert lowered(list(ops), [ArraySpec("A", ndim)], grid) == {"A": expected}, (axes, grid)
+
+
+def test_operations_see_what_the_previous_ones_left() -> None:
+    """Names a cut makes are usable on the next line; a struct unzipped into two arrays is gone."""
+    arrays = [ArraySpec("A", 2), ArraySpec("Z", 1, members=("re", "im")), ArraySpec("x", 1)]
+    ops = [
+        Cast("A", Precision.FP32),
+        Block("A", "i0", "4", ("o", "f")),
+        Permute("A", ("o", "f", "i1")),
+        Unzip("Z", ("Z_re", "Z_im")),
+        Cast("Z_re", Precision.FP32),
+        Zip(("Z_re", "Z_im"), "W"),
+        Replicate("x"),
+        Place("A", Location.DEVICE),
+    ]
+    state = run(ops, arrays, None, "operations")
+    assert sorted(state.arrays) == ["A", "W", "x"]
+    assert state.arrays["A"].digits.order() == ("o", "f", "i1")
+    assert state.arrays["A"].precision is Precision.FP32
+    assert state.arrays["A"].location is Location.DEVICE
+    assert state.arrays["W"].members == (("Z_re", Precision.FP32), ("Z_im", None))
+    assert state.arrays["x"].replicated
 
 
 def test_a_non_row_major_local_order_is_refused_with_the_permute_that_fixes_it() -> None:
-    ops = [block("i0", 4, ["o", "f"]), {"op": "permute", "order": ["f", "o", "i1"]}]
-    with pytest.raises(ValueError, match=r"append \{\"op\": \"permute\", \"order\": \['o', 'f', 'i1'\]\}"):
-        lowered(ops, 2, [4])
+    ops = [Block("A", "i0", "4", ("o", "f")), Permute("A", ("f", "o", "i1"))]
+    expected = r'append \{"action": "permute", "array": "A", "order": \[\'o\', \'f\', \'i1\'\]\}'
+    with pytest.raises(ValueError, match=expected):
+        lowered(ops, A2, [4])
 
 
 @pytest.mark.parametrize(
     ("ops", "match"),
     [
-        ([{"op": "pad", "digit": "i0", "amount": 4}], "'pad' is not implemented yet"),
-        ([{"op": "shuffle", "digits": ["i0"], "f": ["i0"], "f_inv": ["i0"]}], "'shuffle' is not implemented yet"),
-        ([block("i0", 3, ["i0", "r"]), distribute("r")], "must have extent P0 = 4"),
-        ([distribute("i0")], "has an unknown extent"),
-        (
-            [block("i0", "2*P0", ["o", "c"]), block("c", 2, ["r", "b"]), block("o", 3, ["o", "x"]), distribute("r")],
-            "must be blocked by",
-        ),
-        ([split("i0", 2, ["a", "b"]), split("a", 2, ["x", "y"])], "already cut"),
-        ([block("i2", 4, ["a", "b"])], "no digit 'i2'"),
-        ([block("i0", 4, ["i1", "b"])], r"name\(s\) \['i1'\] are taken"),
-        ([split("i0", "P1", ["r", "i0"]), distribute("r", 3)], "grid_dim 3 does not exist"),
-        ([{"op": "permute", "order": ["i1"]}], "must name every digit once"),
+        ([Pad("A", "i0", "4")], "pad is not implemented yet"),
+        ([Zip(("A", "B"), "W")], "zip is not implemented yet"),
+        ([Block("A", "i0", "3", ("i0", "r")), Distribute("A", 0, digit="r")], "must have extent P0 = 4"),
+        ([Distribute("A", 0, digit="i0")], "has an unknown extent"),
+        ([Split("A", "i0", "2", ("a", "b")), Split("A", "a", "2", ("x", "y"))], "already cut"),
+        ([Block("A", "i2", "4", ("a", "b"))], "no digit 'i2'"),
+        ([Block("A", "i0", "4", ("i1", "b"))], r"name\(s\) \['i1'\] are taken"),
+        ([Split("A", "i0", "P1", ("r", "i0")), Distribute("A", 3, digit="r")], "grid_dim 3 does not exist"),
+        ([Permute("A", ("i1",))], "must name every digit once"),
+        ([Cast("Q", Precision.FP32)], "no array 'Q'"),
+        ([Block("M", "i0", "2", ("a", "b"))], "block applies to dense arrays only"),
+        ([Format("A", "csr")], "format applies to sparse arrays"),
+        ([Distribute("A", 0, dim=0, scheme=Scheme.BLOCK), Replicate("A")], "cannot also be replicated"),
+        ([Block("A", "i0", "2", ("o", "f")), Zip(("A", "B"), "W")], "regroups whole arrays"),
+        ([Unzip("A", ("a", "b"))], "has 0 member"),
     ],
 )
-def test_a_sequence_that_cannot_lower_is_refused_by_name(ops: list[dict[str, object]], match: str) -> None:
+def test_an_operation_that_cannot_apply_is_refused_by_name(ops: list, match: str) -> None:
+    arrays = [ArraySpec("A", 2), ArraySpec("B", 2), ArraySpec("M", 2, sparse=True)]
     with pytest.raises(ValueError, match=match):
-        lowered(ops, 2, [4, 2])
+        lowered(ops, arrays, [4, 2])
 
 
-def test_every_op_has_its_inverse() -> None:
-    """pad <-> unpad, permute <-> the order before it, block <-> unblock, shuffle f <-> f_inv."""
-    shuffle = {"op": "shuffle", "digits": ["i0", "i1"], "f": ["i0", "i1 ^ (i0 % 8)"], "f_inv": ["i0", "i1 ^ (i0 % 8)"]}
-    ops = tuple(
-        parse_op(raw, "t")
-        for raw in (
-            {"op": "pad", "digit": "i0", "amount": 4},
-            {"op": "permute", "order": ["i1", "i0"]},
-            shuffle,
-            block("i1", "P0", ["o", "f"]),
-        )
-    )
-    inverted = inverse_sequence(ops, 2)
-    assert [op_json(op) for op in inverted] == [
-        {"op": "unblock", "digits": ["o", "f"], "factor": "P0", "into": "i1"},
+@pytest.mark.parametrize(
+    ("make", "match"),
+    [
+        (lambda: Distribute("A", 0), "either the digit, or the dim and scheme"),
+        (lambda: Distribute("A", 0, digit="r", dim=0, scheme=Scheme.BLOCK), "either the digit"),
+        (lambda: Distribute("A", 0, dim=0), "needs both dim and scheme"),
+        (lambda: Distribute("A", 0, dim=0, scheme=Scheme.BLOCK_CYCLIC), "block_size goes with"),
+        (lambda: Shuffle("A", ("i0", "i1"), ("i0",), ("i0",)), "one expression per"),
+        (lambda: LinearShuffle("A", ("i0",), (2,), ((1, 1), (1, 1))), "singular"),
+    ],
+)
+def test_a_malformed_operation_is_refused_when_it_is_made(make, match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        make()
+
+
+def test_every_digit_operation_has_its_inverse() -> None:
+    """pad <-> unpad, permute <-> the order before it, block <-> unblock, split <-> unsplit, shuffle f <-> f_inv."""
+    shuffle = Shuffle("A", ("i0", "i1"), ("i0", "i1 ^ (i0 % 8)"), ("i0", "i1 ^ (i0 % 8)"))
+    ops = (Pad("A", "i0", "4"), Permute("A", ("i1", "i0")), shuffle, Block("A", "i1", "P0", ("o", "f")))
+    assert inverse_sequence(ops, 2) == (
+        Unblock("A", ("o", "f"), "P0", "i1"),
         shuffle,
-        {"op": "permute", "order": ["i0", "i1"]},
-        {"op": "unpad", "digit": "i0", "amount": 4},
-    ]
+        Permute("A", ("i0", "i1")),
+        ops[0].inverse(()),
+    )
+    assert Split("A", "i0", "P0", ("r", "l")).inverse(()) == Unsplit("A", ("r", "l"), "P0", "i0")
     with pytest.raises(ValueError, match="undone by the gather"):
-        inverse_sequence((parse_op(split("i0", 2, ["r", "i0"]), "t"), parse_op(distribute("r"), "t")), 1)
+        inverse_sequence((Split("A", "i0", "2", ("r", "i0")), Distribute("A", 0, digit="r")), 1)
 
 
-def test_every_registered_op_round_trips_through_json_and_inverts() -> None:
-    """Adding an op is one registered class: its JSON and its inverse come from the registry."""
-    samples = {
-        "block": block("i0", "2*P0", ["o", "f"]),
-        "unblock": {"op": "unblock", "digits": ["i0", "i1"], "factor": 2, "into": "x"},
-        "split": split("i0", "P0", ["r", "l"]),
-        "unsplit": {"op": "unsplit", "digits": ["i0", "i1"], "parts": "P0", "into": "x"},
-        "permute": {"op": "permute", "order": ["i1", "i0"]},
-        "pad": {"op": "pad", "digit": "i1", "amount": "P0 - 1"},
-        "unpad": {"op": "unpad", "digit": "i1", "amount": 3},
-        "shuffle": {"op": "shuffle", "digits": ["i1"], "f": ["(i1 + 3) % 8"], "f_inv": ["(i1 + 5) % 8"]},
-        "linear_shuffle": {"op": "linear_shuffle", "digits": ["i0", "i1"], "bits": [1, 1], "matrix": [[1, 0], [1, 1]]},
-        "distribute": distribute("i0"),
-    }
-    assert set(samples) == set(LAYOUT_OPS.keys())
-    for raw in samples.values():
-        op = parse_op(raw, "t")
-        assert op_json(op) == raw
-        if not isinstance(op, Distribute):
-            after = tuple(raw.get("order", ("i0", "i1")))  # the digit names a permute leaves
-            assert op.inverse(("i0", "i1")).inverse(after) == op
+def test_unblock_and_unsplit_undo_their_cuts_in_the_digit_tuple() -> None:
+    ops = [
+        Block("A", "i0", "4", ("o", "f")),
+        Unblock("A", ("o", "f"), "4", "i0"),
+        Split("A", "i0", "3", ("a", "b")),
+        Unsplit("A", ("a", "b"), "3", "i0"),
+        Distribute("A", 0, dim=0, scheme=Scheme.BLOCK),
+    ]
+    assert lowered(ops, [ArraySpec("A", 1)], [2]) == {"A": [AxisSplit(0, Scheme.BLOCK, 1)]}
 
 
 def test_a_linear_shuffle_inverts_its_matrix_over_gf2() -> None:
@@ -182,52 +217,18 @@ def test_a_linear_shuffle_inverts_its_matrix_over_gf2() -> None:
     product = [[sum(skew[r][k] * inverse[k][c] for k in range(3)) % 2 for c in range(3)] for r in range(3)]
     assert product == [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
     assert gf2_inverse(((1, 1), (1, 1))) is None
-    raw = {"op": "linear_shuffle", "digits": ["i0", "i1"], "bits": [2, 1], "matrix": [list(r) for r in skew]}
-    op = parse_op(raw, "t")
-    assert isinstance(op, LinearShuffle)
-    assert op.inverse(("i0", "i1")).matrix == inverse
+    assert LinearShuffle("A", ("i0", "i1"), (2, 1), skew).inverse(()).matrix == inverse
 
 
-def test_unblock_and_unsplit_undo_their_cuts_in_the_digit_tuple() -> None:
-    ops = [
-        block("i0", 4, ["o", "f"]),
-        {"op": "unblock", "digits": ["o", "f"], "factor": 4, "into": "i0"},
-        split("i0", 3, ["a", "b"]),
-        {"op": "unsplit", "digits": ["a", "b"], "parts": 3, "into": "i0"},
-        split("i0", "P0", ["r", "i0"]),
-        distribute("r"),
-    ]
-    assert lowered(ops, 1, [2]) == [AxisSplit(0, Scheme.BLOCK, 1)]
-
-
-@pytest.mark.parametrize(
-    ("raw", "match"),
-    [
-        ({"op": "bogus"}, "not a layout op"),
-        ({"op": "permute", "order": ["i0", "i0"]}, "names a digit twice"),
-        ({"op": "block", "digit": "P0", "factor": 2, "into": ["a", "b"]}, "other than P, P0"),
-        ({"op": "block", "digit": "i0", "factor": 2, "into": ["a"]}, "two digits the cut leaves"),
-        ({"op": "shuffle", "digits": ["i0"], "f": ["i0"]}, "f_inv must be a list of index expressions"),
-        ({"op": "shuffle", "digits": ["i0", "i1"], "f": ["i0"], "f_inv": ["i0"]}, "one expression per"),
-        ({"op": "shuffle", "digits": ["i0"], "f": ["i0 ** 2"], "f_inv": ["i0"]}, "uses Pow"),
-        ({"op": "block", "digit": "i0", "factor": 4, "into": ["a", "b"], "dim": 1}, r"unknown field\(s\) \['dim'\]"),
-        ({"op": "linear_shuffle", "digits": ["i0"], "bits": [2], "matrix": [[1, 1], [1, 1]]}, "singular"),
-    ],
-)
-def test_a_malformed_op_is_refused_by_name(raw: dict[str, object], match: str) -> None:
-    with pytest.raises(ValueError, match=match):
-        parse_op(raw, "t")
-
-
-def test_zip_and_unzip_are_group_ops_requested_as_name_to_fields() -> None:
-    """Zip fuses arrays into one struct array and unzip splits one; neither is the other's inverse op."""
-    assert set(GROUP_OPS.keys()) == {"zip", "unzip"}
-    (zipped,) = groups_from_json("zip", {"uv": ["u", "v"]}, "zip")
-    assert zipped == Zip("uv", ("u", "v"))
-    assert groups_json([zipped, Unzip("z", ("re", "im"))]) == {"zip": {"uv": ["u", "v"]}, "unzip": {"z": ["re", "im"]}}
-    assert "inverse" not in vars(Unzip)
-    with pytest.raises(ValueError, match="two or more arrays"):
-        groups_from_json("unzip", {"z": ["re"]}, "unzip")
+def test_a_request_reads_its_precisions_formats_and_locations() -> None:
+    requests = Requests(
+        Startup(("openblas",), ("P",)),
+        (Cast("A", Precision.FP16), Cast("A", Precision.FP32), Format("M", "csr"), Place("A", Location.DEVICE)),
+    )
+    assert requests.distributed
+    assert requests.precisions() == {"A": Precision.FP32}
+    assert requests.formats() == {"M": "csr"}
+    assert requests.locations() == {"A": Location.DEVICE}
 
 
 def test_an_index_expression_evaluates_with_python_floor_semantics() -> None:
@@ -242,21 +243,20 @@ def test_an_index_expression_evaluates_with_python_floor_semantics() -> None:
 
 
 if __name__ == "__main__":
-    test_the_three_schemes_lower_from_their_op_sequences()
+    test_the_three_schemes_lower_from_their_primitive_operations()
+    test_the_short_form_is_the_primitive_operations()
     test_a_grid_factor_re_evaluates_at_every_rank_count()
     test_a_grid_is_extents_over_the_rank_count()
-    test_the_default_layout_raises_to_ops_that_lower_back(1)
-    test_the_default_layout_raises_to_ops_that_lower_back(2)
-    test_the_default_layout_raises_to_ops_that_lower_back(3)
+    test_the_default_layout_raises_to_operations_that_lower_back(1)
+    test_the_default_layout_raises_to_operations_that_lower_back(2)
+    test_the_default_layout_raises_to_operations_that_lower_back(3)
+    test_operations_see_what_the_previous_ones_left()
     test_a_non_row_major_local_order_is_refused_with_the_permute_that_fixes_it()
-    test_a_sequence_that_cannot_lower_is_refused_by_name([{"op": "pad", "digit": "i0", "amount": 4}], "'pad' is not")
-    test_a_sequence_that_cannot_lower_is_refused_by_name([distribute("i0")], "has an unknown extent")
-    test_a_sequence_that_cannot_lower_is_refused_by_name([block("i2", 4, ["a", "b"])], "no digit 'i2'")
-    test_every_op_has_its_inverse()
-    test_every_registered_op_round_trips_through_json_and_inverts()
-    test_a_linear_shuffle_inverts_its_matrix_over_gf2()
+    test_an_operation_that_cannot_apply_is_refused_by_name([Pad("A", "i0", "4")], "pad is not implemented yet")
+    test_an_operation_that_cannot_apply_is_refused_by_name([Cast("Q", Precision.FP32)], "no array 'Q'")
+    test_a_malformed_operation_is_refused_when_it_is_made(lambda: Distribute("A", 0), "either the digit")
+    test_every_digit_operation_has_its_inverse()
     test_unblock_and_unsplit_undo_their_cuts_in_the_digit_tuple()
-    test_a_malformed_op_is_refused_by_name({"op": "bogus"}, "not a layout op")
-    test_a_malformed_op_is_refused_by_name({"op": "permute", "order": ["i0", "i0"]}, "names a digit twice")
-    test_zip_and_unzip_are_group_ops_requested_as_name_to_fields()
+    test_a_linear_shuffle_inverts_its_matrix_over_gf2()
+    test_a_request_reads_its_precisions_formats_and_locations()
     test_an_index_expression_evaluates_with_python_floor_semantics()
