@@ -178,6 +178,7 @@ def test_a_non_row_major_local_order_is_refused_with_the_permute_that_fixes_it()
             "not the two digits of one split",
         ),
         ([Place("A", Location.DEVICE), Zip(("A", "B"), "W")], "placed alike"),
+        ([Pad("A", "i0", "2"), Block("A", "i0", "4", ("o", "f"))], "padded or shuffled; cut or merge digits before"),
     ],
 )
 def test_an_operation_that_cannot_apply_is_refused_by_name(ops: list, match: str) -> None:
@@ -208,13 +209,13 @@ def test_a_malformed_operation_is_refused_when_it_is_made(make, match: str) -> N
 
 def test_every_digit_operation_has_its_inverse() -> None:
     """pad <-> unpad, permute <-> the order before it, block <-> unblock, split <-> unsplit, shuffle f <-> f_inv."""
-    shuffle = Shuffle("A", ("i0", "i1"), ("i0", "i1 ^ (i0 % 8)"), ("i0", "i1 ^ (i0 % 8)"))
-    ops = (Pad("A", "i0", "4"), Permute("A", ("i1", "i0")), shuffle, Block("A", "i1", "P0", ("o", "f")))
+    shuffle = Shuffle("A", ("i0", "f"), ("i0", "f ^ (i0 % 8)"), ("i0", "f ^ (i0 % 8)"))
+    ops = (Block("A", "i1", "P0", ("o", "f")), Pad("A", "i0", "4"), Permute("A", ("f", "o", "i0")), shuffle)
     assert inverse_sequence(ops, 2) == (
-        Unblock("A", ("o", "f"), "P0", "i1"),
         shuffle,
-        Permute("A", ("i0", "i1")),
-        ops[0].inverse(()),
+        Permute("A", ("i0", "o", "f")),
+        ops[1].inverse(()),
+        Unblock("A", ("o", "f"), "P0", "i1"),
     )
     assert Split("A", "i0", "P0", ("r", "l")).inverse(()) == Unsplit("A", ("r", "l"), "P0", "i0")
     with pytest.raises(ValueError, match="undone by the gather"):

@@ -17,16 +17,18 @@ its checks and its effect live in one place, and :mod:`relayout.requests` maps i
 not cover yet is refused by name, never approximated. Design: docs/layout.md.
 """
 
-import ast
 import dataclasses
 import enum
+import itertools
 import math
-import operator
 import types
 import typing
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple, NewType, NoReturn
+
+from relayout.expr import check_index_expr, eval_index
+from relayout.layout import Axis, IndexMap, Renumber, substitute
 
 __all__ = [
     "DIM_DIGIT",
@@ -152,93 +154,6 @@ class Precision(enum.Enum):
 def grid_names(grid: Sequence[int]) -> dict[str, int]:
     """``{"P0": grid[0], ...}``: the names a factor expression reads."""
     return {GRID_SYMBOL.format(g): int(p) for g, p in enumerate(grid)}
-
-
-# ---- index expressions -----------------------------------------------------------------------------
-
-#: The operators an index expression may use: integer arithmetic, floor and mod, and the bitwise ones
-#: XOR swizzles need.
-BINOP_FUNCTIONS: dict[type[ast.operator], Callable[[int, int], int]] = {
-    ast.Add: operator.add,
-    ast.Sub: operator.sub,
-    ast.Mult: operator.mul,
-    ast.FloorDiv: operator.floordiv,
-    ast.Mod: operator.mod,
-    ast.BitXor: operator.xor,
-    ast.BitAnd: operator.and_,
-    ast.BitOr: operator.or_,
-    ast.LShift: operator.lshift,
-    ast.RShift: operator.rshift,
-}
-
-
-def int_root(value: int, degree: int) -> int:
-    """The floor of the ``degree``-th root of ``value`` (``root(P, 2)`` is a square grid's edge)."""
-    if value < 0 or degree < 1:
-        raise ValueError(f"root({value}, {degree}) needs a non-negative value and a degree >= 1")
-    guess = round(value ** (1 / degree))
-    while guess**degree > value:
-        guess -= 1
-    while (guess + 1) ** degree <= value:
-        guess += 1
-    return guess
-
-
-#: Function name -> (arity, implementation).
-INDEX_CALLS: dict[str, tuple[int, Callable[..., int]]] = {
-    "min": (2, min),
-    "max": (2, max),
-    "root": (2, int_root),
-}
-
-
-def check_index_expr(text: str, where: str) -> str:
-    """``text`` when it is an integer expression of the allowed form, else a request fault."""
-    try:
-        tree = ast.parse(text, mode="eval")
-    except SyntaxError:
-        raise ValueError(f"{where}: {text!r} is not an expression") from None
-    for walked in ast.walk(tree.body):
-        node = walked.op if isinstance(walked, (ast.BinOp, ast.UnaryOp)) else walked
-        allowed = (
-            isinstance(node, (ast.Name, ast.Load, ast.USub, *BINOP_FUNCTIONS))
-            or (isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(node.value, bool))
-            or (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id in INDEX_CALLS
-                and len(node.args) == INDEX_CALLS[node.func.id][0]
-                and not node.keywords
-            )
-        )
-        if not allowed:
-            raise ValueError(
-                f"{where}: {text!r} uses {type(node).__name__}; an index expression takes ints, names, "
-                f"+ - * // % ^ & | << >> and min(a, b), max(a, b), root(a, k)"
-            )
-    return text
-
-
-def eval_index(text: str, names: Mapping[str, int], where: str) -> int:
-    """The value of the index expression ``text`` (:func:`check_index_expr`'s form) with ``names`` bound;
-    ``//`` and ``%`` floor like Python's."""
-
-    def value(node: ast.expr) -> int:
-        if isinstance(node, ast.Constant) and isinstance(node.value, int):
-            return node.value
-        if isinstance(node, ast.Name):
-            if node.id not in names:
-                raise ValueError(f"{where}: {text!r} names {node.id!r}, which is not bound here ({sorted(names)})")
-            return names[node.id]
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
-            return -value(node.operand)
-        if isinstance(node, ast.BinOp) and type(node.op) in BINOP_FUNCTIONS:
-            return BINOP_FUNCTIONS[type(node.op)](value(node.left), value(node.right))
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in INDEX_CALLS:
-            return INDEX_CALLS[node.func.id][1](*(value(arg) for arg in node.args))
-        raise ValueError(f"{where}: {text!r} is not an index expression")
-
-    return value(ast.parse(check_index_expr(text, where), mode="eval").body)
 
 
 # ---- the processor grid ------------------------------------------------------------------------------
@@ -452,7 +367,7 @@ class DigitTuple:
     """One array's digit tuple while the operations apply. ``grid`` None = names and shapes
     only (an expression is not evaluated, its digit's extent stays unknown)."""
 
-    __slots__ = ("digits", "distributed", "grid", "names", "ndim", "where")
+    __slots__ = ("digits", "distributed", "grid", "names", "ndim", "pads", "renumbers", "where")
 
     def __init__(self, ndim: int, grid: Sequence[int] | None, where: str) -> None:
         self.ndim = ndim
@@ -461,6 +376,10 @@ class DigitTuple:
         self.digits = [Digit(DIM_DIGIT.format(d), d, 1, None) for d in range(ndim)]
         #: (the distributed digit, its grid dim), in distribute order.
         self.distributed: list[tuple[Digit, int]] = []
+        #: Digit name -> its dead cells.
+        self.pads: dict[str, int] = {}
+        #: The bijections over digit values, in order; their digits are no longer cut or merged.
+        self.renumbers: list[Renumber] = []
         #: The op being applied, for refusals.
         self.where = where
 
@@ -485,6 +404,35 @@ class DigitTuple:
                 return position
         raise ValueError(f"{self.where}: no digit {name!r}; the digits are {list(self.order())}")
 
+    def cut(self, name: str) -> Digit:
+        """Digit ``name`` for a cut or a merge: neither padded nor renumbered."""
+        if name in self.pads or any(name in renumber.axes for renumber in self.renumbers):
+            raise ValueError(f"{self.where}: {name!r} is padded or shuffled; cut or merge digits before that")
+        return self.digits[self.find(name)]
+
+    def pad(self, name: str, amount: int | None) -> None:
+        """Grow digit ``name`` by ``amount`` dead cells (negative: drop them again)."""
+        self.find(name)
+        if amount is None:
+            return
+        cells = self.pads.get(name, 0) + amount
+        if cells < 0:
+            raise ValueError(f"{self.where}: {name!r} has {self.pads.get(name, 0)} dead cell(s), not {-amount}")
+        self.pads[name] = cells
+        if cells == 0:
+            del self.pads[name]
+
+    def renumber(self, names: Sequence[str], f: Sequence[str], f_inv: Sequence[str]) -> None:
+        """Map the values of digits ``names`` through ``f`` (back by ``f_inv``), with ``P0, P1, ...`` bound."""
+        for name in names:
+            self.find(name)
+        grid = {name: str(value) for name, value in self.names.items()}
+        f, f_inv = (tuple(substitute(expr, grid) for expr in exprs) for exprs in (f, f_inv))
+        extents = [self.digits[self.find(name)].extent for name in names]
+        if all(extent is not None for extent in extents) and math.prod(extents) <= BIJECTION_CHECK_LIMIT:  # type: ignore[arg-type]
+            check_bijection(names, extents, f, f_inv, self.where)  # type: ignore[arg-type]
+        self.renumbers.append(Renumber(tuple(names), f, f_inv))
+
     def replace(self, position: int, new: Sequence[Digit]) -> None:
         """Put ``new`` where the digit at ``position`` was; their names must not clash with the others'."""
         others = {digit.name for k, digit in enumerate(self.digits) if k != position}
@@ -495,8 +443,8 @@ class DigitTuple:
 
     def block(self, name: str, factor: int | None, into: tuple[str, str]) -> None:
         """Cut digit ``name`` ``(d, s, e)`` into coarse ``(d, s*b, ceil(e/b))`` and fine ``(d, s, b)``, in place."""
+        old = self.cut(name)
         position = self.find(name)
-        old = self.digits[position]
         outer = None if old.extent is None or factor is None else math.ceil(old.extent / factor)
         coarse = Digit(into[0], old.dim, old.stride * (factor or 0), outer, old.band)
         self.replace(position, [coarse, Digit(into[1], old.dim, old.stride, factor)])
@@ -504,8 +452,8 @@ class DigitTuple:
     def split(self, name: str, parts: int | None, into: tuple[str, str]) -> None:
         """Cut the whole dimension's digit ``name`` into the band index (extent ``parts``) and the index
         within the band, in place."""
+        old = self.cut(name)
         position = self.find(name)
-        old = self.digits[position]
         if old.extent is not None or old.stride != 1 or old.band:
             raise ValueError(f"{self.where}: split cuts a whole dimension's digit; {name!r} is already cut")
         bands = Digit(into[0], old.dim, 1, parts, band=True)
@@ -513,7 +461,7 @@ class DigitTuple:
 
     def merge(self, pair: tuple[str, str], into: str, *, band: bool) -> None:
         """Merge the coarse and fine digits ``pair`` of one dimension back into one digit ``into``."""
-        coarse, fine = (self.digits[self.find(name)] for name in pair)
+        coarse, fine = (self.cut(name) for name in pair)
         adjacent = (
             fine.stride == 1 and fine.extent is None and not fine.band
             if band
@@ -527,8 +475,8 @@ class DigitTuple:
 
     def distribute(self, name: str, grid_dim: int) -> None:
         """Hand digit ``name`` (extent ``P_g``) to ``grid_dim``: it becomes the rank coordinate and leaves the tuple."""
+        digit = self.cut(name)
         position = self.find(name)
-        digit = self.digits[position]
         if self.grid is not None:
             if grid_dim >= len(self.grid):
                 raise ValueError(f"{self.where}: grid_dim {grid_dim} does not exist (the grid is {list(self.grid)})")
@@ -565,6 +513,25 @@ class DigitTuple:
                 f"contiguous bands); its local digits are {own}"
             )
         return AxisSplit(grid_dim, Scheme.CYCLIC if width == 1 else Scheme.BLOCK_CYCLIC, width)
+
+    def index_map(self, shape: Sequence[str], where: str) -> IndexMap:
+        """The rank-local layout of an array whose rank-local logical extents are ``shape``: the remaining
+        digits, each distributed digit's stride divided out of the coarser digits of its dimension."""
+        if self.grid is None:
+            raise ValueError(f"{where}: a layout needs the factors evaluated; run the operations on a grid")
+        if len(shape) != self.ndim:
+            raise ValueError(f"{where}: the shape {list(shape)} has {len(shape)} dimension(s), not {self.ndim}")
+        bands = [digit.name for digit in self.digits if digit.band]
+        if bands:
+            raise ValueError(f"{where}: {bands} split a dimension into bands for distribution; distribute them")
+        axes = []
+        for digit in self.digits:
+            stride = digit.stride
+            for rank, _ in self.distributed:
+                if not rank.band and rank.dim == digit.dim and stride >= rank.stride * (rank.extent or 1):
+                    stride //= rank.extent or 1
+            axes.append(Axis(digit.name, digit.dim, stride, digit.extent, self.pads.get(digit.name, 0)))
+        return IndexMap(tuple(str(extent) for extent in shape), tuple(axes), tuple(self.renumbers))
 
     def lower(self, where: str, array: str) -> list[AxisSplit | None]:
         """Per dimension its split (None = not split); the rank-local digits must end row-major."""
@@ -671,6 +638,12 @@ class State:
         """Refuse ``name`` for a new array when it is taken."""
         if name in self.arrays:
             raise ValueError(f"{self.where}: an array {name!r} exists already")
+
+    def layout(self, name: str, shape: Sequence[str]) -> IndexMap:
+        """Array ``name``'s rank-local layout for rank-local logical extents ``shape``."""
+        if name not in self.arrays:
+            raise ValueError(f"no array {name!r}; the arrays are {sorted(self.arrays)}")
+        return self.arrays[name].digits.index_map(shape, f"array {name!r}")
 
     def untouched(self, name: str, op: Operation) -> ArrayState:
         """Array ``name`` before any layout: zip and unzip regroup whole arrays."""
@@ -938,7 +911,8 @@ class Pad(DigitOperation):
     amount: Expr
 
     def apply(self, state: State) -> None:
-        state.digits(self.array, self).find(self.digit)
+        digits = state.digits(self.array, self)
+        digits.pad(self.digit, digits.eval(self.amount))
 
     def inverse(self, before: tuple[str, ...]) -> "Unpad":
         return Unpad(self.array, self.digit, self.amount)
@@ -956,7 +930,9 @@ class Unpad(DigitOperation):
     amount: Expr
 
     def apply(self, state: State) -> None:
-        state.digits(self.array, self).find(self.digit)
+        digits = state.digits(self.array, self)
+        amount = digits.eval(self.amount)
+        digits.pad(self.digit, None if amount is None else -amount)
 
     def inverse(self, before: tuple[str, ...]) -> Pad:
         return Pad(self.array, self.digit, self.amount)
@@ -980,9 +956,7 @@ class Shuffle(DigitOperation):
             raise ValueError(f"f and f_inv need one expression per shuffled digit ({len(self.digits)})")
 
     def apply(self, state: State) -> None:
-        digits = state.digits(self.array, self)
-        for name in self.digits:
-            digits.find(name)
+        state.digits(self.array, self).renumber(self.digits, self.f, self.f_inv)
 
     def inverse(self, before: tuple[str, ...]) -> "Shuffle":
         return Shuffle(self.array, self.digits, self.f_inv, self.f)
@@ -1012,8 +986,14 @@ class LinearShuffle(DigitOperation):
 
     def apply(self, state: State) -> None:
         digits = state.digits(self.array, self)
-        for name in self.digits:
-            digits.find(name)
+        for name, width in zip(self.digits, self.bits, strict=True):
+            extent = digits.digits[digits.find(name)].extent
+            if digits.grid is not None and extent != 2**width:
+                raise ValueError(f"{state.where}: {name!r} has extent {extent}, not 2**{width}")
+        inverse = gf2_inverse(self.matrix) or ()
+        digits.renumber(
+            self.digits, xor_exprs(self.digits, self.bits, self.matrix), xor_exprs(self.digits, self.bits, inverse)
+        )
 
     def inverse(self, before: tuple[str, ...]) -> "LinearShuffle":
         inverse = gf2_inverse(self.matrix)
@@ -1131,6 +1111,40 @@ def gf2_inverse(matrix: Sequence[Sequence[int]]) -> tuple[tuple[int, ...], ...] 
     return tuple(tuple(row[n:]) for row in rows)
 
 
+def xor_exprs(names: Sequence[str], bits: Sequence[int], matrix: Sequence[Sequence[int]]) -> tuple[str, ...]:
+    """The values of digits ``names`` (``bits`` wide) after the GF(2) map ``matrix`` on their bits, least
+    significant first in ``names`` order: one expression per digit."""
+    inputs = [f"(({name} >> {b}) & 1)" for name, width in zip(names, bits, strict=True) for b in range(width)]
+    outputs = []
+    for row in matrix:
+        terms = [inputs[j] for j, bit in enumerate(row) if bit]
+        outputs.append(" ^ ".join(terms) if terms else "0")
+    exprs, start = [], 0
+    for width in bits:
+        parts = [f"(({outputs[start + b]}) << {b})" if b else f"({outputs[start]})" for b in range(width)]
+        exprs.append(" | ".join(parts) if parts else "0")
+        start += width
+    return tuple(exprs)
+
+
+#: The largest digit space a shuffle's ``f_inv(f(x)) == x`` is checked over exhaustively.
+BIJECTION_CHECK_LIMIT = 1 << 20
+
+
+def check_bijection(
+    names: Sequence[str], extents: Sequence[int], f: Sequence[str], f_inv: Sequence[str], where: str
+) -> None:
+    """Refuse ``f`` unless it maps the digit space of ``extents`` into itself and ``f_inv`` undoes it."""
+    for values in itertools.product(*(range(extent) for extent in extents)):
+        bound = dict(zip(names, values, strict=True))
+        image = [eval_index(expr, bound, where) for expr in f]
+        if any(not 0 <= v < e for v, e in zip(image, extents, strict=True)):
+            raise ValueError(f"{where}: f maps {list(values)} to {image}, outside the digits' extents {list(extents)}")
+        back = [eval_index(expr, dict(zip(names, image, strict=True)), where) for expr in f_inv]
+        if back != list(values):
+            raise ValueError(f"{where}: f_inv(f({list(values)})) = {back}; f_inv must undo f")
+
+
 # ---- defaults and the request ------------------------------------------------------------------------
 
 
@@ -1192,8 +1206,9 @@ class Requests:
         return None if grid is None else grid_extents(grid, ranks, "startup.grid")
 
     def run(self, arrays: Sequence[ArraySpec], ranks: int | None = None) -> State:
-        """The operations run over ``arrays``, on the grid at ``ranks`` ranks (None = names and shapes only)."""
-        grid = None
+        """The operations run over ``arrays``: on the grid at ``ranks`` ranks; without ``ranks``, names and
+        shapes only for a distributed request (its factors read the grid) and evaluated for a single-node one."""
+        grid: tuple[int, ...] | None = None if self.distributed else ()
         if ranks is not None:
             if self.startup.grid is None:
                 raise ValueError("operations distribute nothing without startup.grid")
