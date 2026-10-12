@@ -76,11 +76,6 @@ def test_python_frontend_mpi():
 
 @pytest.mark.fortran
 @pytest.mark.skipif(find_flang() is None, reason="no LLVM flang found")
-@pytest.mark.xfail(
-    strict=True,
-    reason="dace-fortran main cannot build MATMUL over a data-indexed section, into a section destination or inside "
-    "an expression; fixed by spcl/dace-fortran#5",
-)
 def test_fortran_frontend_mpi(tmp_path_factory):
     import dace_fortran
 

@@ -930,10 +930,11 @@ dependencies = [
 [[package]]
 name = "dace-fortran"
 version = "1.0.0"
-source = { git = "ssh://git@github.com/spcl/dace-fortran.git?branch=main#602d54862c625778440577a903edc1eb4799bcb7" }
+source = { git = "ssh://git@github.com/spcl/dace-fortran.git?branch=main#a65937ea39a4869b8bf9c3a28736252ed98a365e" }
 dependencies = [
     { name = "dace" },
     { name = "fparser" },
+    { name = "nanobind" },
     { name = "networkx" },
     { name = "numpy" },
 ]
