@@ -223,12 +223,12 @@ class Regroup(ast.NodeTransformer):
             return ast.Subscript(ast.Name(field.into, ast.Load()), index, node.ctx)
         if name in self.split:
             split = self.split[name]
-            if split.dim >= len(elements) or not isinstance(elements[split.dim], ast.Constant):
+            constant = elements.pop(split.dim) if split.dim < len(elements) else None
+            if not (isinstance(constant, ast.Constant) and isinstance(constant.value, int)):
                 raise LayoutError(
                     f"{where(node)}: {name!r} is split along dimension {split.dim}; index it by a constant"
                 )
-            constant = elements.pop(split.dim)
-            part = split.parts[int(constant.value)]  # type: ignore[union-attr]
+            part = split.parts[constant.value]
             return ast.Subscript(
                 ast.Name(part, ast.Load()), ast.Tuple(elements or [ast.Constant(0)], ast.Load()), node.ctx
             )
