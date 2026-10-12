@@ -160,6 +160,11 @@ def rewrite_accesses(sdfg: dace.SDFG, name: str, new_name: str, layout: IndexMap
     nested SDFGs it flows into are laid out in turn."""
     for inner_sdfg, inner in list(nested_uses(sdfg, name)):
         inner_desc = inner_sdfg.arrays[inner]
+        if len(inner_desc.shape) != len(layout.shape):
+            raise LayoutError(
+                f"nested SDFG {inner_sdfg.label!r} receives {name!r} as {inner!r} of rank {len(inner_desc.shape)}, "
+                f"a slice of the rank-{len(layout.shape)} array; pass it whole (prepare_for_layout widens nested inputs)"
+            )
         inner_layout = layout.with_shape([str(s) for s in inner_desc.shape])
         rewrite_accesses(inner_sdfg, inner, inner, inner_layout)
         inner_sdfg.arrays[inner] = laid_out_descriptor(inner_desc, inner_layout, inner_desc.transient)
@@ -174,6 +179,9 @@ def rewrite_accesses(sdfg: dace.SDFG, name: str, new_name: str, layout: IndexMap
             if memlet.data == name and mpi_buffer(edge) and not in_order(memlet.subset, layout):
                 packed_transfer(sdfg, state, edge, new_name, layout)
             elif memlet.data == name:
+                view = next((n for n in (edge.src, edge.dst) if is_view(sdfg, n)), None)
+                if view is not None:
+                    restride_view(sdfg, view.data, memlet.subset, layout)
                 memlet.data = new_name
                 memlet.subset = physical_subset(memlet.subset, layout)
                 library_rule(state, edge, layout)
@@ -187,6 +195,27 @@ def rewrite_accesses(sdfg: dace.SDFG, name: str, new_name: str, layout: IndexMap
         condition = edge.data.condition.as_string
         if name in condition:
             edge.data.condition = CodeBlock(rewrite_subscripts(condition, name, new_name, layout.physical))
+
+
+def is_view(sdfg: dace.SDFG, node: nodes.Node) -> bool:
+    return isinstance(node, nodes.AccessNode) and isinstance(sdfg.arrays[node.data], data.View)
+
+
+def restride_view(sdfg: dace.SDFG, view: str, subset: subsets.Subset | None, layout: IndexMap) -> None:
+    """A view of the box ``subset`` of a laid-out array reads it with the laid-out buffer's strides:
+    each view dimension is a varying dimension of the box, in order. A cut has no such strides."""
+    if layout.view() is None:
+        raise LayoutError(f"{view!r} views a slice of an array laid out by cuts or a shuffle; copy the slice instead")
+    ranges = as_range(subset).ranges
+    varying = [d for d, (begin, end, _) in enumerate(ranges) if not symbolic.equal_valued(begin, end)]
+    desc = sdfg.arrays[view]
+    if len(desc.shape) != len(varying):
+        raise LayoutError(
+            f"{view!r} reshapes its slice ({len(varying)} varying dimensions, view rank {len(desc.shape)})"
+        )
+    axis_of = {axis.dim: k for k, axis in enumerate(layout.axes)}
+    strides = packed_strides([expr(extent) for extent in layout.extents()])
+    desc.strides = tuple(strides[axis_of[d]] for d in varying)
 
 
 def access_name(node: nodes.Node) -> str | None:

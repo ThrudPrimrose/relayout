@@ -1,25 +1,17 @@
 """Single-process OMEN SSE: the Python and Fortran frontends against the numpy closed form."""
 
-import importlib.util
-from pathlib import Path
+import pathlib
+import tempfile
 
 import numpy as np
 import pytest
 
+from conftest import flang_missing
 from relayout.kernels import omen_sse
 from relayout.kernels.omen_sse.sse import sse
 
-HERE = Path(omen_sse.__file__).parent
+HERE = pathlib.Path(omen_sse.__file__).parent
 SIZE = omen_sse.SIZES["S"]
-
-
-def flang_missing() -> bool:
-    """The Fortran frontend needs the optional ``fortran`` extra and an LLVM flang."""
-    if importlib.util.find_spec("dace_fortran") is None:
-        return True
-    from dace_fortran.llvm_toolchain import find_flang  # optional extra: imported only when installed
-
-    return find_flang() is None
 
 
 def naive(neigh_idx, dH, G, D, Sigma):
@@ -73,3 +65,11 @@ def test_fortran_frontend(tmp_path):
     # Fortran names are case-insensitive: the SDFG declares them lower-case
     sdfg(**{name.lower(): value for name, value in {**fargs, **SIZE}.items()})
     np.testing.assert_allclose(fargs["Sigma"], expected, rtol=1e-12)
+
+
+if __name__ == "__main__":
+    test_reference_matches_loop_nest()
+    test_python_frontend()
+    if not flang_missing():
+        with tempfile.TemporaryDirectory() as tmp:
+            test_fortran_frontend(pathlib.Path(tmp))

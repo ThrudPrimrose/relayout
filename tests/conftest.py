@@ -16,3 +16,12 @@ def mpi_or_skip() -> Any:  # noqa: ANN401  # the mpi4py.MPI module
     except RuntimeError as exc:
         pytest.skip(f"mpi4py finds no MPI library: {str(exc).splitlines()[0]}")
     return MPI
+
+
+def flang_missing() -> bool:
+    """The Fortran frontend needs the optional ``fortran`` extra and an LLVM flang."""
+    if importlib.util.find_spec("dace_fortran") is None:
+        return True
+    from dace_fortran.llvm_toolchain import find_flang  # noqa: PLC0415  # optional extra
+
+    return find_flang() is None

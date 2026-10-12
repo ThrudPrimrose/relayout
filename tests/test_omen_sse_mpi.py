@@ -1,27 +1,17 @@
 """Distributed OMEN SSE (energy -> momentum Alltoall). Run under ``mpirun -n 2 pytest tests/test_omen_sse_mpi.py``."""
 
-import importlib.util
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from conftest import mpi_or_skip
+from conftest import flang_missing, mpi_or_skip
 from relayout.kernels import omen_sse
 
 pytestmark = pytest.mark.mpi
 HERE = Path(omen_sse.__file__).parent
 # Nkz and NE must split evenly over the ranks.
 SIZE = dict(omen_sse.SIZES["S"], Nkz=4, NE=4)
-
-
-def flang_missing() -> bool:
-    """The Fortran frontend needs the optional ``fortran`` extra and an LLVM flang."""
-    if importlib.util.find_spec("dace_fortran") is None:
-        return True
-    from dace_fortran.llvm_toolchain import find_flang  # optional extra: imported only when installed
-
-    return find_flang() is None
 
 
 def comm_or_skip():
@@ -102,3 +92,10 @@ def test_fortran_frontend_mpi(tmp_path_factory):
     # Fortran names are case-insensitive: the SDFG declares them lower-case
     func(**{name.lower(): value for name, value in {**fargs, "Sigmal": Sigmal, **sizes}.items()})
     np.testing.assert_allclose(Sigmal, expected, rtol=1e-12)
+
+
+if __name__ == "__main__":
+    try:
+        test_python_frontend_mpi()
+    except pytest.skip.Exception as skipped:
+        print(f"skipped: {skipped}")

@@ -1,32 +1,63 @@
 # relayout
 
-Layout transformation sequences on DaCe SDFGs. Targets: GPU linear layouts, and distributed runs where
-layout and data distribution change together (MPI, NCCL/RCCL).
+Data layout transformations for numpy and DaCe programs, kept outside DaCe's core (as
+[FP-Arena](https://github.com/spcl/FP-Arena) keeps its floating-point types). One request says how a
+kernel's arrays should be laid out, cast and distributed; relayout checks it, rewrites the program
+for it (a numpy / mpi4py program or an SDFG) and generates the kernels that convert the data.
 
 ## Install
 
 ```
-uv sync --extra mpi --extra fortran --group dev
+uv sync --extra mpi --group dev        # add --extra fortran for the Fortran kernels (needs LLVM flang)
 ```
 
-One dace for everything: `spcl/dace@extended` (overrides the pins in dace-fortran and hpcagent-bench).
-Fortran tests need LLVM `flang` on PATH.
+relayout follows dace's `extended` branch; dace, islpy, z3 and numpy are dependencies.
 
-## Layout
+## Quickstart: OMEN's self-energy (SC19)
 
-- `src/relayout/ops.py` relayout requests as a Python API: `startup` (libraries, a grid over the rank
-  count) and `operations` run top to bottom (cast, format, zip/unzip, digit cuts, distribute, replicate,
-  place), and the lowering to one split per dimension. `src/relayout/requests.py` is their JSON form,
-  one to one, with its JSON Schema. hpcagent-bench's `requests` is this JSON ([docs/layout.md](docs/layout.md)).
-- `src/relayout/kernels/omen_sse/` OMEN scattering self-energy (SC19 Gordon Bell), Python and Fortran,
-  single node and MPI (G energy-distributed in, Sigma momentum-distributed out, one Alltoall).
-  `reference()` is the closed form the SC19 transformation sequence ends at.
-- `src/relayout/benchmarks/` SC26 layout witness kernels from dace@extended, `ORDER` simple to complicated.
-- `tests/` numpy oracles; MPI tests run as `mpirun -n 2 uv run pytest tests/test_omen_sse_mpi.py`.
+[`examples/omen_quickstart.py`](examples/omen_quickstart.py) lays out the scattering self-energy
+kernel of OMEN (Ziogas et al., SC'19) on one node and distributes it as SC19 does:
 
-## Plan
+```python
+from relayout.frontends.sdfg import apply_requests
+from relayout.kernels.omen_sse.sse import sse
+from relayout.ops import ArraySpec, lower
+from relayout.requests import parse_requests
 
-1. OMEN SSE: reproduce the SC19 sequence step by step, one oracle test per step.
-2. Same sequence on GPU, with layouts expressed as linear layouts.
-3. NCCL/RCCL library nodes beside the MPI ones; Alltoall on device buffers.
-4. Benchmarks into hpcagent-bench as layout variants.
+local = parse_requests({"operations": [
+    {"action": "permute", "array": "G", "order": ["i2", "i0", "i1", "i3", "i4"]},   # atom-major G
+    {"action": "permute", "array": "dH", "order": ["i0", "i1", "i3", "i4", "i2"]},  # direction innermost
+]})
+sdfg = sse.to_sdfg(simplify=True)
+apply_requests(sdfg, local)       # the SDFG now runs on the laid-out G and dH; arguments keep their layout
+sdfg(**arrays, **sizes)           # Sigma equals omen_sse.reference(...)
+
+distributed = parse_requests({"startup": {"grid": ["P"]}, "operations": [
+    {"action": "distribute", "array": "G", "grid_dim": 0, "dim": 1, "scheme": "block"},      # energies in
+    {"action": "distribute", "array": "Sigma", "grid_dim": 0, "dim": 0, "scheme": "block"},  # momenta out
+    *({"action": "replicate", "array": a} for a in ("neigh_idx", "dH", "D")),
+]})
+lower(distributed.run([ArraySpec(name, 5) for name in ...], ranks=4))   # each array's split per dimension
+```
+
+## What is in it
+
+| Module | What it does |
+| --- | --- |
+| `relayout.ops` | the request: `startup` (libraries, a processor grid over the rank count `P`) and `operations` run top to bottom (`cast`, `format`, `zip` / `unzip`, the digit cuts `block` / `split` / `permute` / `pad` / `shuffle` / `linear_shuffle` and their inverses, `distribute`, `replicate`, `place`); the lowering of a distribution to one split per dimension |
+| `relayout.requests` | the request's JSON, one to one with `relayout.ops`, and its JSON Schema |
+| `relayout.layout` | `IndexMap`: one array's layout as index arithmetic, logical index to physical and back; the model everything below reads |
+| `relayout.convert` | conversion kernels: one gather that casts, lays out and changes sparse formats in a single pass, as C with OpenMP and as a CUDA / HIP kernel; numpy forms for tests |
+| `relayout.sparse` | sparse formats (csr, csc, coo, bsr, dia, ell) planned once from a canonical CSR; values move through the gather |
+| `relayout.rules` | how a library call absorbs a permuted operand: transpose, einsum, contraction / reduction axes, BLAS transpose flags |
+| `relayout.frontends.python` | a numpy / mpi4py program rewritten for laid-out arrays (element accesses, logical views, packed MPI buffers) |
+| `relayout.frontends.sdfg` | an SDFG rewritten for laid-out arrays: one rewrite for every layout, library nodes by their rules, MPI library nodes through packed buffers |
+| `relayout.kernels`, `relayout.benchmarks` | the OMEN SSE kernel (Python, Fortran, MPI) and the layout witness kernels, each with a numpy oracle |
+
+The request format and the lowering are described in [docs/layout.md](docs/layout.md).
+
+## Tests
+
+`pytest` runs everything on one process; the MPI tests also run under
+`mpirun -n 2 pytest tests/test_frontend_sdfg_mpi.py tests/test_omen_sse_mpi.py`, and the device kernels
+where cupy finds a GPU.
