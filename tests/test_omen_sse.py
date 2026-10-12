@@ -1,16 +1,25 @@
 """Single-process OMEN SSE: the Python and Fortran frontends against the numpy closed form."""
 
+import importlib.util
 from pathlib import Path
 
 import numpy as np
 import pytest
-from dace_fortran.llvm_toolchain import find_flang
 
 from relayout.kernels import omen_sse
 from relayout.kernels.omen_sse.sse import sse
 
 HERE = Path(omen_sse.__file__).parent
 SIZE = omen_sse.SIZES["S"]
+
+
+def flang_missing() -> bool:
+    """The Fortran frontend needs the optional ``fortran`` extra and an LLVM flang."""
+    if importlib.util.find_spec("dace_fortran") is None:
+        return True
+    from dace_fortran.llvm_toolchain import find_flang  # optional extra: imported only when installed
+
+    return find_flang() is None
 
 
 def naive(neigh_idx, dH, G, D, Sigma):
@@ -47,7 +56,7 @@ def test_python_frontend():
 
 
 @pytest.mark.fortran
-@pytest.mark.skipif(find_flang() is None, reason="no LLVM flang found")
+@pytest.mark.skipif(flang_missing(), reason="no dace-fortran (extra 'fortran') or no LLVM flang")
 def test_fortran_frontend(tmp_path):
     import dace_fortran
 

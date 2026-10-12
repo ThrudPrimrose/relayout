@@ -6,7 +6,7 @@ layout and data distribution change together (MPI, NCCL/RCCL).
 ## Install
 
 ```
-uv sync --extra mpi --group dev        # + --extra bench for hpcagent-bench kernels
+uv sync --extra mpi --extra fortran --group dev
 ```
 
 One dace for everything: `spcl/dace@extended` (overrides the pins in dace-fortran and hpcagent-bench).
@@ -14,6 +14,9 @@ Fortran tests need LLVM `flang` on PATH.
 
 ## Layout
 
+- `src/relayout/ops.py` layout op sequences: the op registry and JSON schema, inverses, and the lowering
+  to one split per dimension. hpcagent-bench's `requests.layout` is this schema; adding an op is one
+  registered class.
 - `src/relayout/kernels/omen_sse/` OMEN scattering self-energy (SC19 Gordon Bell), Python and Fortran,
   single node and MPI (G energy-distributed in, Sigma momentum-distributed out, one Alltoall).
   `reference()` is the closed form the SC19 transformation sequence ends at.
