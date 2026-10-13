@@ -10,12 +10,13 @@ fused with a cast like a dense conversion. The canonical CSR has int64 indices, 
 columns ascending within a row.
 """
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 import numpy as np
 import numpy.typing as npt
 
-__all__ = ["FORMATS", "Csr", "SparseFormat", "SparsePlan", "gather", "plan", "scatter"]
+__all__ = ["FORMATS", "Csr", "SparseFormat", "SparsePlan", "boundary", "convert", "decode", "gather", "plan", "scatter"]
 
 type Index = npt.NDArray[np.int64]
 
@@ -152,3 +153,100 @@ def scatter(scheme: SparsePlan, stored: npt.NDArray[np.generic], nnz: int) -> np
     used = scheme.table >= 0
     out[scheme.table[used]] = stored[used]
     return out
+
+
+def coordinates(
+    fmt: SparseFormat, buffers: Mapping[str, Index], shape: tuple[int, int], cells: int
+) -> tuple[Index, Index, Index]:
+    """``(row, col, slot)`` of every value slot ``fmt``'s ``buffers`` hold for a ``shape`` matrix whose value
+    buffer has ``cells`` slots: a slot outside the matrix (ell's -1, dia's overhang) is left out."""
+    rows, cols = shape
+    if fmt.name in ("csr", "csc"):
+        outer = np.repeat(np.arange(rows if fmt.name == "csr" else cols, dtype=np.int64), np.diff(buffers["indptr"]))
+        inner = np.asarray(buffers["indices"], dtype=np.int64)
+        row, col = (outer, inner) if fmt.name == "csr" else (inner, outer)
+        return row, col, np.arange(row.size, dtype=np.int64)
+    if fmt.name == "coo":
+        row = np.asarray(buffers["row"], dtype=np.int64)
+        return row, np.asarray(buffers["col"], dtype=np.int64), np.arange(row.size, dtype=np.int64)
+    if fmt.name == "bsr":
+        b = fmt.block
+        block_row = np.repeat(np.arange(rows // b, dtype=np.int64), np.diff(buffers["indptr"]))
+        block_col = np.asarray(buffers["indices"], dtype=np.int64)
+        k, i, j = np.indices((block_row.size, b, b), dtype=np.int64).reshape(3, -1)
+        return block_row[k] * b + i, block_col[k] * b + j, np.arange(k.size, dtype=np.int64)
+    if fmt.name == "dia":
+        offsets = np.asarray(buffers["offsets"], dtype=np.int64)
+        d, col = np.indices((offsets.size, cols), dtype=np.int64).reshape(2, -1)
+        row = col - offsets[d]
+        inside = (row >= 0) & (row < rows)
+        return row[inside], col[inside], np.arange(d.size, dtype=np.int64)[inside]
+    indices = np.asarray(buffers["indices"], dtype=np.int64)  # ell
+    row = np.repeat(np.arange(rows, dtype=np.int64), indices.shape[1] if indices.ndim == 2 else 0)
+    flat = indices.reshape(-1)
+    used = flat >= 0
+    return row[used], flat[used], np.arange(flat.size, dtype=np.int64)[used]
+
+
+def decode(
+    fmt: SparseFormat, buffers: Mapping[str, Index], values: npt.NDArray[np.generic], shape: tuple[int, int]
+) -> tuple[Csr, npt.NDArray[np.generic]]:
+    """The canonical CSR of a matrix ``fmt`` stores (index ``buffers``, value buffer ``values``): entries
+    sorted by row and column, duplicates summed. A blocked or diagonal format's padding comes back as explicit
+    zeros (its stored cells are all the pattern it has)."""
+    flat = np.asarray(values).reshape(-1)
+    row, col, slot = coordinates(fmt, buffers, shape, flat.size)
+    order = np.lexsort((col, row))
+    row, col, data = row[order], col[order], flat[slot[order]]
+    first = np.ones(row.size, dtype=bool)
+    first[1:] = (row[1:] != row[:-1]) | (col[1:] != col[:-1])
+    starts = np.flatnonzero(first)
+    summed = np.add.reduceat(data, starts) if data.size else data
+    indptr = counts_to_indptr(np.bincount(row[starts], minlength=shape[0]))
+    return Csr(shape, indptr, col[starts]), summed
+
+
+def convert(
+    given: SparseFormat,
+    buffers: Mapping[str, Index],
+    values: npt.NDArray[np.generic],
+    shape: tuple[int, int],
+    wanted: SparseFormat,
+) -> tuple[SparsePlan, npt.NDArray[np.generic], Csr]:
+    """The matrix ``given`` stores, in ``wanted``: its plan (index buffers, scalars, table), its value buffer,
+    and the canonical CSR between them."""
+    csr, data = decode(given, buffers, values, shape)
+    scheme = plan(csr, wanted)
+    return scheme, gather(scheme, data), csr
+
+
+def boundary(
+    program: Callable[..., object],
+    name: str,
+    given: SparseFormat,
+    wanted: SparseFormat,
+    shape: tuple[str, str],
+    written: bool = False,
+) -> Callable[..., object]:
+    """``program`` (a Python function or an SDFG, called with keyword arguments) written for sparse array
+    ``name`` in ``wanted``, called instead with it in ``given``: the members ``<name>_<role>`` and
+    ``<name>_data`` the caller passes in ``given`` (sizes in the arguments named by ``shape``) are converted to
+    ``wanted``'s, with its scalars (``<name>_width``, ...), before the call; ``written``, the values the program
+    leaves are converted back into the caller's ``<name>_data`` after it."""
+
+    def call(**arguments: object) -> object:
+        roles = FORMATS[given.name]
+        matrix = (int(arguments[shape[0]]), int(arguments[shape[1]]))  # type: ignore[call-overload]
+        buffers = {role: np.asarray(arguments.pop(f"{name}_{role}")) for role in roles}
+        data = np.asarray(arguments.pop(f"{name}_data"))
+        scheme, stored, csr = convert(given, buffers, data, matrix, wanted)
+        arguments |= {f"{name}_{role}": buffer for role, buffer in scheme.buffers.items()}
+        arguments |= {f"{name}_{scalar}": value for scalar, value in scheme.scalars.items()}
+        arguments[f"{name}_data"] = stored
+        result = program(**arguments)
+        if written:
+            back = plan(csr, given)
+            data[...] = gather(back, scatter(scheme, stored, csr.nnz)).reshape(data.shape)
+        return result
+
+    return call

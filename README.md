@@ -48,7 +48,7 @@ lower(distributed.run([ArraySpec(name, 5) for name in ...], ranks=4))   # each a
 | `relayout.requests` | the request's JSON, one to one with `relayout.ops`, and its JSON Schema |
 | `relayout.layout` | `IndexMap`: one array's layout as index arithmetic, logical index to physical and back; the model everything below reads |
 | `relayout.convert` | conversion kernels: one gather that casts, lays out and changes sparse formats in a single pass, as C with OpenMP and as a CUDA / HIP kernel; numpy forms for tests |
-| `relayout.sparse` | sparse formats (csr, csc, coo, bsr, dia, ell) planned once from a canonical CSR; values move through the gather |
+| `relayout.sparse` | sparse formats (csr, csc, coo, bsr, dia, ell) planned once from a canonical CSR, every format decoded back to it and converted to every other; values move through the gather; `boundary` calls a program (Python or SDFG) written for one format with another, converting at the call |
 | `relayout.rules` | how a library call absorbs a permuted operand: transpose, einsum, contraction / reduction axes, BLAS transpose flags (gemm, matmul, syrk) and triangles (syrk, symm) |
 | `relayout.frontends.python` | a numpy / mpi4py program rewritten for laid-out arrays (element accesses, logical views, packed MPI buffers) |
 | `relayout.frontends.sdfg` | an SDFG rewritten for laid-out arrays: one rewrite for every layout, library nodes by their rules, MPI library nodes through packed buffers; `zip` / `unzip` along a dimension (data-dependent indices select their part), `zip` of different element types into an array of structs, and `cast` through FP-Arena (extra `fparena`) |
