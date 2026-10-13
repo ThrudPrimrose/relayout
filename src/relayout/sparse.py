@@ -53,6 +53,12 @@ class SparseFormat:
     def label(self) -> str:
         return f"{self.name}:{self.block}" if self.block else self.name
 
+    def refusal(self, shape: tuple[int, int]) -> str | None:
+        """Why this format cannot hold a ``shape`` matrix (a bsr block edge that does not tile it), or None."""
+        if self.block and (shape[0] % self.block or shape[1] % self.block):
+            return f"bsr:{self.block} does not tile the {shape[0]} x {shape[1]} matrix"
+        return None
+
 
 @dataclass(frozen=True, slots=True)
 class Csr:
@@ -113,8 +119,9 @@ def plan(csr: Csr, fmt: SparseFormat) -> SparsePlan:
         return SparsePlan(fmt, {"indptr": indptr, "indices": row[order]}, {}, order)
     if fmt.name == "bsr":
         b = fmt.block
-        if rows % b or cols % b:
-            raise ValueError(f"bsr:{b} does not tile the {rows} x {cols} matrix")
+        refused = fmt.refusal(csr.shape)
+        if refused is not None:
+            raise ValueError(refused)
         block_cols = cols // b
         key = (row // b) * block_cols + col // b
         blocks, slot = np.unique(key, return_inverse=True)

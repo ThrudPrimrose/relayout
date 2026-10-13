@@ -31,6 +31,7 @@ from typing import Any, ClassVar, NamedTuple, NewType, NoReturn
 from relayout.convert import ELEMENTS
 from relayout.expr import check_index_expr, eval_index, is_root, node_names
 from relayout.layout import Axis, IndexMap, Renumber, substitute
+from relayout.sparse import SparseFormat
 
 __all__ = [
     "DIM_DIGIT",
@@ -255,6 +256,13 @@ def check_digit_pair(names: Sequence[str], where: str) -> None:
     check_distinct(names, where, check_digit_name)
 
 
+def check_format_label(label: str, where: str) -> None:
+    try:
+        SparseFormat.parse(label)
+    except ValueError as exc:
+        raise ValueError(f"{where}: {exc}") from None
+
+
 def check_index_exprs(texts: Sequence[str], where: str) -> None:
     for k, text in enumerate(texts):
         check_index_expr(text, f"{where}[{k}]")
@@ -278,7 +286,7 @@ FIELD_CHECKS: dict[object, Callable[[Any, str], object]] = {
     DigitPair: check_digit_pair,
     Expr: check_index_expr,
     IndexExprs: check_index_exprs,
-    FormatLabel: check_name,
+    FormatLabel: check_format_label,
 }
 
 
