@@ -2,11 +2,11 @@
 """The SDFG frontend: a program whose arrays are laid out (arguments converted in and out, transients
 in place) computes what it computed before."""
 
+import dace
 import numpy as np
 import pytest
-
-import dace
 from conftest import variant
+
 from relayout.frontends.sdfg import LayoutError, apply_requests, relayout_array
 from relayout.layout import IndexMap
 from relayout.ops import ArraySpec, Block, Pad, Permute, Shuffle, run
@@ -16,7 +16,7 @@ N, M = (dace.symbol(s) for s in "NM")
 
 
 @dace.program
-def stencil(A: dace.float64[N, M], B: dace.float64[N, M]):  # noqa: N803
+def stencil(A: dace.float64[N, M], B: dace.float64[N, M]):
     tmp = dace.define_local([N, M], dace.float64)
     for i, j in dace.map[0:N, 0:M]:
         tmp[i, j] = A[i, j] * 2.0
@@ -61,22 +61,22 @@ K = dace.symbol("K")
 
 
 @dace.program
-def matmul(A: dace.float64[N, K], B: dace.float64[K, M], C: dace.float64[N, M]):  # noqa: N803
+def matmul(A: dace.float64[N, K], B: dace.float64[K, M], C: dace.float64[N, M]):
     C[:] = A @ B
 
 
 @dace.program
-def contraction(A: dace.float64[N, K, M], B: dace.float64[K, M], C: dace.float64[N]):  # noqa: N803
+def contraction(A: dace.float64[N, K, M], B: dace.float64[K, M], C: dace.float64[N]):
     C[:] = np.tensordot(A, B, axes=([1, 2], [0, 1]))
 
 
 @dace.program
-def einsum(A: dace.float64[N, K], B: dace.float64[K, M], C: dace.float64[N, M]):  # noqa: N803
+def einsum(A: dace.float64[N, K], B: dace.float64[K, M], C: dace.float64[N, M]):
     C[:] = np.einsum("ij,jk->ik", A, B)
 
 
 @dace.program
-def transpose(A: dace.float64[N, K, M], C: dace.float64[M, N, K]):  # noqa: N803
+def transpose(A: dace.float64[N, K, M], C: dace.float64[M, N, K]):
     C[:] = np.transpose(A, (2, 0, 1))
 
 
@@ -152,7 +152,7 @@ def test_a_json_request_lays_out_the_program() -> None:
 
 def test_a_library_node_without_a_rule_is_refused() -> None:
     @dace.program
-    def product(A: dace.float64[N, N], x: dace.float64[N], y: dace.float64[N]):  # noqa: N803
+    def product(A: dace.float64[N, N], x: dace.float64[N], y: dace.float64[N]):
         y[:] = A @ x
 
     sdfg = product.to_sdfg(simplify=True)
@@ -160,7 +160,26 @@ def test_a_library_node_without_a_rule_is_refused() -> None:
         relayout_array(sdfg, "A", layout([Block("A", "i0", "2", ("o", "f"))], ["N", "N"]))
 
 
+@dace.program
+def half(A: dace.float64[N, M], B: dace.float64[N, M]):
+    for i, j in dace.map[0 : N // 2, 0:M]:
+        B[i, j] = A[i, j] + 1.0
+
+
+def test_an_argument_written_in_part_keeps_the_cells_the_program_leaves() -> None:
+    sdfg = half.to_sdfg(simplify=True)
+    variant(sdfg, "partial")
+    relayout_array(sdfg, "B", layout([Permute("A", ("i1", "i0"))], ["N", "M"]))
+    a = np.random.default_rng(3).random((6, 4))
+    b = np.random.default_rng(4).random((6, 4))
+    want = b.copy()
+    want[:3] = a[:3] + 1.0
+    sdfg(A=a, B=b, N=6, M=4)
+    np.testing.assert_array_equal(b, want)
+
+
 if __name__ == "__main__":
+    test_an_argument_written_in_part_keeps_the_cells_the_program_leaves()
     test_laid_out_arguments_and_transients_compute_the_same(
         [Permute("A", ("i1", "i0"))], [Pad("A", "i0", "2")], [Permute("A", ("i1", "i0"))]
     )

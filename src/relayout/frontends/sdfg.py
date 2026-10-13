@@ -33,17 +33,17 @@ from dace.libraries.mpi.nodes import Irecv, Wait, Waitall
 from dace.libraries.mpi.nodes.node import MPINode
 from dace.libraries.standard.nodes.copy import CopyLibraryNode
 from dace.properties import CodeBlock
-from dace.transformation.interstate.expand_nested_sdfg_inputs import ExpandNestedSDFGInputs
-from dace.transformation.passes.canonicalize.pipeline import canonicalize
-from dace.transformation.passes.canonicalize.untile_loops import UntileLoops
-from dace.transformation.passes.insert_explicit_copies import InsertExplicitCopies
-from dace.transformation.passes.remove_views import RemoveViews
 from dace.sdfg import propagation
 from dace.sdfg.graph import MultiConnectorEdge
 from dace.sdfg.state import LoopRegion, SDFGState
 from dace.transformation.dataflow.map_unroll import MapUnroll
+from dace.transformation.interstate.expand_nested_sdfg_inputs import ExpandNestedSDFGInputs
 from dace.transformation.interstate.loop_unroll import LoopUnroll
 from dace.transformation.passes.analysis import loop_analysis
+from dace.transformation.passes.canonicalize.pipeline import canonicalize
+from dace.transformation.passes.canonicalize.untile_loops import UntileLoops
+from dace.transformation.passes.insert_explicit_copies import InsertExplicitCopies
+from dace.transformation.passes.remove_views import RemoveViews
 
 from relayout.layout import IndexMap
 from relayout.ops import ArraySpec, Cast, DigitOperation, Requests, Unzip, Zip
@@ -55,11 +55,14 @@ __all__ = [
     "LayoutError",
     "Placement",
     "apply_requests",
+    "covers",
     "laid_name",
     "physical_subset",
     "prepare",
     "relayout_array",
+    "rewrite_accesses",
     "rewrite_subscripts",
+    "transfer",
     "unzip_array",
     "zip_arrays",
 ]
@@ -249,11 +252,13 @@ def rewrite_subscripts(text: str, name: str, new_name: str, indices: Callable[[l
     return ast.unparse(Replace().visit(ast.parse(text, mode="eval")))
 
 
-def nested_uses(sdfg: dace.SDFG, name: str) -> Iterator[tuple[dace.SDFG, str]]:
-    """Each nested SDFG ``name`` flows into, with its inner connector, once (a read-write array's two
-    connectors are one inner array)."""
+def nested_uses(
+    sdfg: dace.SDFG, name: str, states: Sequence[SDFGState] | None = None
+) -> Iterator[tuple[dace.SDFG, str]]:
+    """Each nested SDFG ``name`` flows into (in ``states``, default all), with its inner connector, once (a
+    read-write array's two connectors are one inner array)."""
     seen: set[tuple[int, str]] = set()
-    for state in sdfg.states():
+    for state in sdfg.states() if states is None else states:
         for node in state.nodes():
             if not isinstance(node, nodes.NestedSDFG):
                 continue
@@ -287,14 +292,17 @@ def product(values: Sequence[Symbolic]) -> Symbolic:
     return out
 
 
-def rewrite_accesses(sdfg: dace.SDFG, name: str, target: str, placement: Placement) -> None:
+def rewrite_accesses(
+    sdfg: dace.SDFG, name: str, target: str, placement: Placement, states: Sequence[SDFGState] | None = None
+) -> None:
     """Every access to ``name`` in ``sdfg`` moved to ``target`` (already described in ``sdfg``) through
-    ``placement``. A nested SDFG ``name`` flows into receives the whole target: its array keeps its name,
-    takes the target's descriptor and is rewritten the same way."""
+    ``placement``; with ``states``, only the accesses in those states (interstate edges untouched). A
+    nested SDFG ``name`` flows into receives the whole target: its array keeps its name, takes the target's
+    descriptor and is rewritten the same way."""
     target_desc = sdfg.arrays[target]
     if not isinstance(target_desc, data.Array):
         raise LayoutError(f"{target!r} is no array")
-    for inner_sdfg, inner in list(nested_uses(sdfg, name)):
+    for inner_sdfg, inner in list(nested_uses(sdfg, name, states)):
         inner_desc = inner_sdfg.arrays[inner]
         if len(inner_desc.shape) != len(sdfg.arrays[name].shape):
             raise LayoutError(
@@ -305,13 +313,15 @@ def rewrite_accesses(sdfg: dace.SDFG, name: str, target: str, placement: Placeme
         inner_target.transient = False
         inner_sdfg.arrays[inner] = inner_target
         rewrite_accesses_in(inner_sdfg, inner, inner, placement.nested([str(s) for s in inner_desc.shape]))
-    rewrite_accesses_in(sdfg, name, target, placement)
+    rewrite_accesses_in(sdfg, name, target, placement, states)
 
 
-def rewrite_accesses_in(sdfg: dace.SDFG, name: str, target: str, placement: Placement) -> None:
+def rewrite_accesses_in(
+    sdfg: dace.SDFG, name: str, target: str, placement: Placement, states: Sequence[SDFGState] | None = None
+) -> None:
     """:func:`rewrite_accesses` within ``sdfg`` itself (its nested SDFGs done)."""
     target_desc = sdfg.arrays[target]
-    for state in sdfg.states():
+    for state in sdfg.states() if states is None else states:
         for copy_node in [n for n in state.nodes() if isinstance(n, CopyLibraryNode)]:
             if any(e.data.data == name for e in state.all_edges(copy_node)):
                 expand_copy(state, copy_node)
@@ -334,6 +344,8 @@ def rewrite_accesses_in(sdfg: dace.SDFG, name: str, target: str, placement: Plac
                 library_rule(state, edge, placement)
             elif memlet.other_subset is not None and target in (access_name(edge.src), access_name(edge.dst)):
                 memlet.other_subset = placement.box(memlet.other_subset)
+    if states is not None:
+        return
     for edge in sdfg.all_interstate_edges():
         assignments = edge.data.assignments
         edge.data.assignments = {
@@ -617,27 +629,38 @@ def packed_transfer(
     )
 
 
+def transfer(
+    state: SDFGState,
+    label: str,
+    source: str,
+    source_at: Placement,
+    target: str,
+    target_at: Placement,
+    shape: Sequence[str],
+) -> None:
+    """A map over the logical index space of ``shape`` copying every cell of ``source`` (placed by
+    ``source_at``) to the same logical cell of ``target`` (placed by ``target_at``)."""
+    params = [f"__r{d}" for d in range(len(shape))]
+    ranges = {p: f"0:{extent}" for p, extent in zip(params, shape, strict=True)}
+    state.add_mapped_tasklet(
+        label,
+        ranges,
+        {"__inp": dace.Memlet(f"{source}[{', '.join(source_at.point(params))}]")},
+        "__out = __inp",
+        {"__out": dace.Memlet(f"{target}[{', '.join(target_at.point(params))}]")},
+        external_edges=True,
+    )
+
+
 def conversion(
     state: SDFGState, logical: str, laid: str, shape: Sequence[str], placement: Placement, inward: bool
 ) -> None:
     """A map over the logical index space of ``shape`` moving ``logical`` into ``laid`` (or back)."""
-    params = [f"__r{d}" for d in range(len(shape))]
-    ranges = {p: f"0:{extent}" for p, extent in zip(params, shape, strict=True)}
-    position = ", ".join(placement.point(params))
-    logical_at, laid_at = ", ".join(params), position
-    source, target = (
-        (f"{logical}[{logical_at}]", f"{laid}[{laid_at}]")
-        if inward
-        else (f"{laid}[{laid_at}]", f"{logical}[{logical_at}]")
-    )
-    state.add_mapped_tasklet(
-        f"relayout_{'in' if inward else 'out'}_{logical}",
-        ranges,
-        {"__inp": dace.Memlet(source)},
-        "__out = __inp",
-        {"__out": dace.Memlet(target)},
-        external_edges=True,
-    )
+    logical_at = Laid(IndexMap.identity(shape))
+    if inward:
+        transfer(state, f"relayout_in_{logical}", logical, logical_at, laid, placement, shape)
+    else:
+        transfer(state, f"relayout_out_{logical}", laid, placement, logical, logical_at, shape)
 
 
 def is_read(sdfg: dace.SDFG, name: str) -> bool:
@@ -655,19 +678,78 @@ def is_written(sdfg: dace.SDFG, name: str) -> bool:
     return any(n.data == name and s.in_degree(n) > 0 for s in sdfg.states() for n in s.data_nodes())
 
 
+def covers_dimension(begin: object, end: object, step: object, extent: object) -> bool:
+    return (
+        symbolic.equal_valued(begin, 0)
+        and symbolic.equal_valued(step, 1)
+        and symbolic.equal_valued(expr(str(end)), expr(str(extent)) - 1)
+    )
+
+
+def covers(state: SDFGState, name: str) -> bool:
+    """Whether ``state`` provably writes every element of ``name``: through one unconditional point write
+    whose every dimension is whole or a distinct parameter of a surrounding map that runs over the whole
+    dimension, or through one whole-array memlet. False whenever unprovable."""
+    extents = array_desc(state.sdfg, name).shape
+    for sink in [n for n in state.data_nodes() if n.data == name and state.in_degree(n) > 0]:
+        for edge in state.in_edges(sink):
+            for leaf in state.memlet_tree(edge).leaves():
+                memlet = leaf.data
+                if memlet.data != name or memlet.wcr is not None or memlet.dynamic:
+                    continue
+                ranges = as_range(memlet.subset).ranges
+                if len(ranges) != len(extents):
+                    continue
+                params: dict[str, tuple[object, object, object]] = {}
+                for scope in state.memlet_path(leaf):
+                    if isinstance(scope.src, nodes.MapExit):
+                        params.update(zip(scope.src.map.params, scope.src.map.range.ranges, strict=True))
+                used: set[str] = set()
+                for (begin, end, step), extent in zip(ranges, extents, strict=True):
+                    whole = covers_dimension(begin, end, step, extent)
+                    param = str(begin)
+                    if not whole and (
+                        not symbolic.equal_valued(begin, end)
+                        or param not in params
+                        or param in used
+                        or not covers_dimension(*params[param], extent)
+                    ):
+                        break
+                    if not whole:
+                        used.add(param)
+                else:
+                    return True
+    return False
+
+
+def always_runs(sdfg: dace.SDFG, state: SDFGState) -> bool:
+    """Whether every run of ``sdfg`` passes through ``state``: a top-level state of an unconditional line."""
+    return state.parent_graph is sdfg and all(
+        sdfg.out_degree(block) <= 1 and all(e.data.is_unconditional() for e in sdfg.out_edges(block))
+        for block in sdfg.nodes()
+    )
+
+
+def fully_written(sdfg: dace.SDFG, name: str) -> bool:
+    """Whether a run of ``sdfg`` provably writes every element of ``name`` (:func:`covers`)."""
+    return any(always_runs(sdfg, state) and covers(state, name) for state in sdfg.states())
+
+
 def move_array(sdfg: dace.SDFG, name: str, target: str, placement: Placement) -> None:
     """Move ``name``'s accesses to ``target`` (described in ``sdfg``) through ``placement``. An argument
-    keeps its descriptor for the caller and is converted into the target at the start (when read) and
-    back at the end (when written); a transient is removed."""
+    keeps its descriptor for the caller and is converted into the target at the start (when read, or
+    written only in part: the conversion back must not overwrite the cells the program leaves) and back
+    at the end (when written); a transient is removed."""
     desc = sdfg.arrays[name]
     shape = [str(extent) for extent in desc.shape]
     read, written = is_read(sdfg, name), is_written(sdfg, name)
+    keeps_cells = written and not fully_written(sdfg, name)
     rewrite_accesses(sdfg, name, target, placement)
     if desc.transient:
         if name != target:
             sdfg.remove_data(name, validate=False)
         return
-    if read:
+    if read or keeps_cells:
         start = sdfg.add_state_before(sdfg.start_block, f"relayout_in_{name}")
         conversion(start, name, target, shape, placement, inward=True)
     if written:
@@ -805,12 +887,13 @@ def unzip_array(sdfg: dace.SDFG, name: str, into: Sequence[str], dim: int) -> li
         edge.data.assignments = {k: split_subscripts(v, name, into, dim) for k, v in assignments.items()}
     if not desc.transient:
         shape = [str(extent) for k, extent in enumerate(desc.shape) if k != dim]
-        if is_read_in_parts(sdfg, into):
+        written = any(is_written(sdfg, part) for part in into)
+        if is_read_in_parts(sdfg, into) or (written and not all(fully_written(sdfg, part) for part in into)):
             start = sdfg.add_state_before(sdfg.start_block, f"unzip_in_{name}")
             for c, part in enumerate(into):
                 conversion(start, part, name, shape, Field(c, dim), inward=False)
         sinks = [b for b in sdfg.nodes() if sdfg.out_degree(b) == 0]
-        if any(is_written(sdfg, part) for part in into):
+        if written:
             end = sdfg.add_state_after(sinks[0], f"unzip_out_{name}")
             for c, part in enumerate(into):
                 conversion(end, part, name, shape, Field(c, dim), inward=True)

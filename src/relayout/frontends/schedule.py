@@ -126,7 +126,10 @@ def simplify_tiles(sdfg: dace.SDFG) -> None:
             for outer, inner, width in tile_pairs(state, entry):
                 for edge in leaf_edges(state, entry):
                     edge.data.subset = dace.subsets.Range(
-                        [tuple(simplify_blocks(sympy.sympify(v), outer, inner, width) for v in r) for r in edge.data.subset.ranges]
+                        [
+                            tuple(simplify_blocks(sympy.sympify(v), outer, inner, width) for v in r)
+                            for r in edge.data.subset.ranges
+                        ]
                     )
 
 
@@ -139,7 +142,11 @@ def untile(sdfg: dace.SDFG) -> int:
         scopes = state.scope_dict()
         for inner_entry in [n for n in state.nodes() if isinstance(n, nodes.MapEntry)]:
             outer_entry = scopes[inner_entry]
-            if not isinstance(outer_entry, nodes.MapEntry) or len(inner_entry.map.params) != 1 or len(outer_entry.map.params) != 1:
+            if (
+                not isinstance(outer_entry, nodes.MapEntry)
+                or len(inner_entry.map.params) != 1
+                or len(outer_entry.map.params) != 1
+            ):
                 continue
             (outer_name,), (inner_name,) = outer_entry.map.params, inner_entry.map.params
             (o_begin, o_end, o_step), (i_begin, i_end, i_step) = outer_entry.map.range[0], inner_entry.map.range[0]
@@ -150,7 +157,10 @@ def untile(sdfg: dace.SDFG) -> int:
             flat = sympy.Symbol(inner_name, integer=True, nonnegative=True)
             rewritten, ok = [], True
             for edge in leaf_edges(state, inner_entry):
-                ranges = [tuple(sympy.sympify(v).subs(int(width) * outer + inner, flat) for v in r) for r in edge.data.subset.ranges]
+                ranges = [
+                    tuple(sympy.sympify(v).subs(int(width) * outer + inner, flat) for v in r)
+                    for r in edge.data.subset.ranges
+                ]
                 if any(sym in (outer, inner) for r in ranges for v in r for sym in sympy.sympify(v).free_symbols):
                     ok = False
                     break
@@ -163,7 +173,9 @@ def untile(sdfg: dace.SDFG) -> int:
             count = sympy.sympify(as_expr(o_end)) + 1
             MapCollapse.apply_to(state.sdfg, outer_map_entry=outer_entry, inner_map_entry=inner_entry)
             collapsed = next(
-                n.map for n in state.nodes() if isinstance(n, nodes.MapEntry) and n.map.params == [outer_name, inner_name]
+                n.map
+                for n in state.nodes()
+                if isinstance(n, nodes.MapEntry) and n.map.params == [outer_name, inner_name]
             )
             collapsed.params = [inner_name]
             collapsed.range = dace.subsets.Range([(0, int(width) * count - 1, 1)])

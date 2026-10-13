@@ -54,3 +54,5 @@ target-version = "py312"
 [tool.ruff.lint.per-file-ignores]
 # Copied verbatim from dace@extended tests/transformations/layout/kernels.
 "src/relayout/benchmarks/k*.py" = ["E731"]
+# An explicit dace tasklet binds its connectors (a << A[...]) by name, which pyflakes cannot see.
+"tests/test_schedule.py" = ["F821", "F841"]
