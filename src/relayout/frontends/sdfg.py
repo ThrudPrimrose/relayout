@@ -49,7 +49,7 @@ from dace.transformation.passes.canonicalize.untile_loops import UntileLoops
 from dace.transformation.passes.insert_explicit_copies import InsertExplicitCopies
 from dace.transformation.passes.remove_views import RemoveViews
 
-from relayout.layout import IndexMap
+from relayout.layout import IndexMap, divides
 from relayout.ops import ArraySpec, Cast, DigitOperation, Precision, Requests, Unzip, Zip
 from relayout.rules import einsum_operand, flips_transpose, transpose_axes
 
@@ -301,12 +301,19 @@ def product(values: Sequence[Symbolic]) -> Symbolic:
 
 
 def rewrite_accesses(
-    sdfg: dace.SDFG, name: str, target: str, placement: Placement, states: Sequence[SDFGState] | None = None
+    sdfg: dace.SDFG,
+    name: str,
+    target: str,
+    placement: Placement,
+    states: Sequence[SDFGState] | None = None,
+    pending: "list[MpiBuffer] | None" = None,
 ) -> None:
     """Every access to ``name`` in ``sdfg`` moved to ``target`` (already described in ``sdfg``) through
     ``placement``; with ``states``, only the accesses in those states (interstate edges untouched). A
     nested SDFG ``name`` flows into receives the whole target: its array keeps its name, takes the target's
-    descriptor and is rewritten the same way."""
+    descriptor and is rewritten the same way. With ``pending``, an MPI buffer whose cells are no contiguous run
+    in logical order is rewritten like any access and recorded there for :func:`pack_mpi_buffers`; without
+    it, it is packed at once."""
     target_desc = sdfg.arrays[target]
     if not isinstance(target_desc, data.Array):
         raise LayoutError(f"{target!r} is no array")
@@ -320,12 +327,18 @@ def rewrite_accesses(
         inner_target = copy.deepcopy(target_desc)
         inner_target.transient = False
         inner_sdfg.arrays[inner] = inner_target
-        rewrite_accesses_in(inner_sdfg, inner, inner, placement.nested([str(s) for s in inner_desc.shape]))
-    rewrite_accesses_in(sdfg, name, target, placement, states)
+        nested_placement = placement.nested([str(s) for s in inner_desc.shape])
+        rewrite_accesses_in(inner_sdfg, inner, inner, nested_placement, pending=pending)
+    rewrite_accesses_in(sdfg, name, target, placement, states, pending)
 
 
 def rewrite_accesses_in(
-    sdfg: dace.SDFG, name: str, target: str, placement: Placement, states: Sequence[SDFGState] | None = None
+    sdfg: dace.SDFG,
+    name: str,
+    target: str,
+    placement: Placement,
+    states: Sequence[SDFGState] | None = None,
+    pending: "list[MpiBuffer] | None" = None,
 ) -> None:
     """:func:`rewrite_accesses` within ``sdfg`` itself (its nested SDFGs done)."""
     target_desc = sdfg.arrays[target]
@@ -340,9 +353,12 @@ def rewrite_accesses_in(
             memlet = edge.data
             if memlet.is_empty():
                 continue
-            if memlet.data == name and mpi_buffer(edge) and not placement.in_order(memlet.subset, target_desc):
-                packed_transfer(sdfg, state, edge, target, placement)
+            packs = memlet.data == name and mpi_buffer(edge) and not placement.in_order(memlet.subset, target_desc)
+            if packs and pending is None:
+                packed_transfer(sdfg, state, edge, target, placement, memlet.subset)
             elif memlet.data == name:
+                if packs and pending is not None:
+                    pending.append(MpiBuffer(sdfg, state, edge, target, placement, copy.deepcopy(memlet.subset)))
                 view = next((n for n in (edge.src, edge.dst) if is_view(sdfg, n)), None)
                 if view is not None:
                     restride_view(sdfg, view.data, memlet.subset, placement, target_desc)
@@ -573,7 +589,16 @@ def in_order(subset: subsets.Subset | None, layout: IndexMap) -> bool:
     ranges = list(as_range(subset).ranges)
     view = layout.view()
     if view is None:
-        return all(symbolic.equal_valued(begin, end) for begin, end, _ in ranges)
+        suffix = trailing_axes(subset, layout)
+        if suffix is None:
+            return False
+        renumbered = {name for renumber in layout.renumbers for name in renumber.axes}
+        axes = [layout.axes[k] for k in suffix]
+        clean = not any(a.pad or a.name in renumbered for a in axes)
+        ordered = [(a.dim, -a.stride) for a in axes] == sorted((a.dim, -a.stride) for a in axes)
+        cuts = [[a for a in layout.axes if a.dim == d] for d in {a.dim for a in axes}]
+        dense = all(divides(own, layout.shape[own[0].dim]) for own in cuts if len(own) > 1)  # no ragged dead cells
+        return clean and ordered and dense
     extents = [expr(extent) for extent in layout.extents()]
     physical = [ranges[axis.dim] for axis in layout.axes]
     varying = [k for k, (begin, end, _) in enumerate(physical) if not symbolic.equal_valued(begin, end)]
@@ -585,6 +610,87 @@ def in_order(subset: subsets.Subset | None, layout: IndexMap) -> bool:
         for k in range(varying[0] + 1, len(physical))
     )
     return dims == sorted(dims) and whole
+
+
+def trailing_axes(subset: subsets.Subset | None, layout: IndexMap) -> list[int] | None:
+    """The physical axes the logical box ``subset`` spans, when its cells are one contiguous run of the
+    laid-out buffer (dead or renumbered cells included): every ranged dimension whole, and the axes it
+    feeds the trailing ones, fed by ranged dimensions only. None when the run is not contiguous; [] for a point."""
+    ranges = list(as_range(subset).ranges)
+    ranged = {d for d, (begin, end, _) in enumerate(ranges) if not symbolic.equal_valued(begin, end)}
+    whole = all(
+        symbolic.equal_valued(ranges[d][0], 0) and symbolic.equal_valued(ranges[d][1], expr(layout.shape[d]) - 1)
+        for d in ranged
+    )
+    spanned = [k for k in range(len(layout.axes)) if feeding_dims(layout, k) & ranged]
+    if not whole or any(not feeding_dims(layout, k) <= ranged for k in spanned):
+        return None
+    return spanned if spanned == list(range(len(layout.axes) - len(spanned), len(layout.axes))) else None
+
+
+@dataclass(frozen=True, slots=True)
+class MpiBuffer:
+    """An MPI node's buffer edge on a laid-out array whose cells are no contiguous run in logical order,
+    rewritten to the laid-out buffer and waiting for :func:`pack_mpi_buffers`: the logical box it moves."""
+
+    sdfg: dace.SDFG
+    state: SDFGState
+    edge: MultiConnectorEdge[dace.Memlet]
+    laid: str
+    placement: Placement
+    logical: subsets.Subset
+
+    def node(self) -> nodes.LibraryNode:
+        return self.edge.dst if isinstance(self.edge.dst, MPINode) else self.edge.src
+
+
+def run_subset(logical: subsets.Subset, layout: IndexMap) -> subsets.Range:
+    """The laid-out buffer's range holding the contiguous run of the logical box ``logical``
+    (:func:`trailing_axes`): its fixed axes at their positions, the spanned ones whole with their dead cells."""
+    spanned = set(trailing_axes(logical, layout) or ())
+    fixed = physical_subset(logical, layout).ranges
+    return subsets.Range(
+        [(0, expr(extent) - 1, 1) if k in spanned else fixed[k] for k, extent in enumerate(layout.extents())]
+    )
+
+
+def rows_outermost(layout: IndexMap) -> bool:
+    """Whether the laid-out buffer keeps logical dimension 0 as its outermost, uncut axis: a collective that
+    deals the buffer out in equal rank chunks then deals out whole logical rows."""
+    first = layout.axes[0]
+    renumbered = {name for renumber in layout.renumbers for name in renumber.axes}
+    alone = sum(axis.dim == 0 for axis in layout.axes) == 1
+    return first.dim == 0 and first.stride == 1 and not first.pad and first.name not in renumbered and alone
+
+
+def pack_mpi_buffers(buffers: Sequence[MpiBuffer]) -> None:
+    """Pack each recorded MPI buffer (:func:`packed_transfer`), except where the MPI node both sends and
+    receives, every buffer of it is one array layout that keeps whole logical rows outermost
+    (:func:`rows_outermost`), and each moves one contiguous run of its buffer (:func:`trailing_axes`): every
+    rank runs the program, so the wire carries one layout's cells end to end, rank chunk by rank chunk. A
+    send or a receive alone cannot see its partner's layout and is always packed."""
+    by_node: dict[int, list[MpiBuffer]] = {}
+    for buffer in buffers:
+        by_node.setdefault(id(buffer.node()), []).append(buffer)
+    for group in by_node.values():
+        node, state = group[0].node(), group[0].state
+        edges = [e for e in state.all_edges(node) if mpi_buffer(e)]
+        layouts = {b.placement.layout if isinstance(b.placement, Laid) else None for b in group}
+        both_ways = any(e.dst is node for e in edges) and any(e.src is node for e in edges)
+        (layout,) = layouts if len(layouts) == 1 else (None,)
+        shared = (
+            both_ways
+            and len(group) == len(edges)
+            and layout is not None
+            and rows_outermost(layout)
+            and all(trailing_axes(b.logical, layout) is not None for b in group)
+        )
+        if shared:
+            for b in group:  # the whole run of the buffer, dead cells included: both ends hold the same cells
+                b.edge.data = dace.Memlet(data=b.laid, subset=run_subset(b.logical, layout))
+            continue
+        for b in group:
+            packed_transfer(b.sdfg, b.state, b.edge, b.laid, b.placement, b.logical)
 
 
 def wait_state(sdfg: dace.SDFG, state: SDFGState, node: nodes.LibraryNode) -> SDFGState:
@@ -600,12 +706,19 @@ def wait_state(sdfg: dace.SDFG, state: SDFGState, node: nodes.LibraryNode) -> SD
 
 
 def packed_transfer(
-    sdfg: dace.SDFG, state: SDFGState, edge: MultiConnectorEdge[dace.Memlet], laid: str, placement: Placement
+    sdfg: dace.SDFG,
+    state: SDFGState,
+    edge: MultiConnectorEdge[dace.Memlet],
+    laid: str,
+    placement: Placement,
+    logical: subsets.Subset,
 ) -> None:
-    """An MPI buffer of a laid-out array moved through a contiguous transient in logical order: packed
-    from the laid-out cells before a send, unpacked into them after a receive (at the wait of an
-    ``Irecv``). The wire order is the logical one, as the program had it before the layout."""
-    box = as_range(edge.data.subset)
+    """An MPI buffer of a laid-out array (the logical box ``logical``) moved through a contiguous transient in
+    logical order: packed from the laid-out cells before a send, unpacked into them after a receive (at the
+    wait of an ``Irecv``). The wire order is the logical one, as the program had it before the layout. Where
+    the box's cells are a strided box of the buffer in logical order (:func:`copyable`) a copy node moves
+    them, else a map over the box."""
+    box = as_range(logical)
     sizes, first = box.size(), box.min_element()
     desc = sdfg.arrays[laid]
     packed, _ = sdfg.add_transient(
@@ -619,9 +732,34 @@ def packed_transfer(
     params = [f"__j{k}" for k in range(len(sizes))]
     ranges = {p: f"0:{size}" for p, size in zip(params, sizes, strict=True)}
     position = placement.point([f"{low} + {p}" for low, p in zip(first, params, strict=True)])
-    laid_memlet = dace.Memlet(f"{laid}[{', '.join(position)}]")
+    by_copy = copyable(logical, placement)
+    laid_memlet = dace.Memlet(data=laid, subset=placement.box(logical) if by_copy else ", ".join(position))
     packed_memlet = dace.Memlet(f"{packed}[{', '.join(params)}]")
     whole = dace.Memlet.from_array(packed, sdfg.arrays[packed])
+
+    def move(target: SDFGState, label: str, inward: bool, laid_node: nodes.AccessNode, packed_node: nodes.AccessNode):
+        """The cells from the laid-out buffer into the packed one (``inward``), or back."""
+        source, destination = (laid_node, packed_node) if inward else (packed_node, laid_node)
+        if by_copy:
+            node = CopyLibraryNode(label)
+            source_memlet, destination_memlet = (laid_memlet, whole) if inward else (whole, laid_memlet)
+            target.add_edge(source, None, node, CopyLibraryNode.INPUT_CONNECTOR_NAME, copy.deepcopy(source_memlet))
+            target.add_edge(
+                node, CopyLibraryNode.OUTPUT_CONNECTOR_NAME, destination, None, copy.deepcopy(destination_memlet)
+            )
+            return
+        read, write = (laid_memlet, packed_memlet) if inward else (packed_memlet, laid_memlet)
+        target.add_mapped_tasklet(
+            label,
+            ranges,
+            {"__inp": copy.deepcopy(read)},
+            "__out = __inp",
+            {"__out": copy.deepcopy(write)},
+            input_nodes={source.data: source},
+            output_nodes={destination.data: destination},
+            external_edges=True,
+        )
+
     sending = isinstance(edge.dst, nodes.LibraryNode)
     state.remove_edge(edge)
     if sending:
@@ -629,16 +767,7 @@ def packed_transfer(
         if isinstance(source, nodes.AccessNode):
             source.data = laid
         packed_node = state.add_access(packed)
-        state.add_mapped_tasklet(
-            f"pack_{packed}",
-            ranges,
-            {"__inp": laid_memlet},
-            "__out = __inp",
-            {"__out": packed_memlet},
-            input_nodes={laid: source},
-            output_nodes={packed: packed_node},
-            external_edges=True,
-        )
+        move(state, f"pack_{packed}", True, source, packed_node)
         state.add_edge(packed_node, None, edge.dst, edge.dst_conn, whole)
         return
     packed_node = state.add_access(packed)
@@ -648,28 +777,22 @@ def packed_transfer(
             state.remove_node(edge.dst)
         after = wait_state(sdfg, state, edge.src)
         target = after.parent_graph.add_state_after(after, f"unpack_{packed}")
-        target.add_mapped_tasklet(
-            f"unpack_{packed}",
-            ranges,
-            {"__inp": packed_memlet},
-            "__out = __inp",
-            {"__out": laid_memlet},
-            external_edges=True,
-        )
+        move(target, f"unpack_{packed}", False, target.add_access(laid), target.add_access(packed))
         return
     destination = edge.dst
     if isinstance(destination, nodes.AccessNode):
         destination.data = laid
-    state.add_mapped_tasklet(
-        f"unpack_{packed}",
-        ranges,
-        {"__inp": packed_memlet},
-        "__out = __inp",
-        {"__out": laid_memlet},
-        input_nodes={packed: packed_node},
-        output_nodes={laid: destination},
-        external_edges=True,
-    )
+    move(state, f"unpack_{packed}", False, destination, packed_node)
+
+
+def copyable(logical: subsets.Subset, placement: Placement) -> bool:
+    """Whether the laid-out cells of the logical box ``logical`` are a strided box of the buffer in logical
+    order (a permuted or padded layout whose varying axes keep their order), so a copy node packs them."""
+    if not isinstance(placement, Laid) or placement.layout.view() is None:
+        return False
+    ranges = as_range(logical).ranges
+    dims = [axis.dim for axis in placement.layout.axes if not symbolic.equal_valued(*ranges[axis.dim][:2])]
+    return dims == sorted(dims)
 
 
 def transfer(
@@ -778,7 +901,9 @@ def fully_written(sdfg: dace.SDFG, name: str) -> bool:
     return any(always_runs(sdfg, state) and covers(state, name) for state in sdfg.states())
 
 
-def move_array(sdfg: dace.SDFG, name: str, target: str, placement: Placement) -> None:
+def move_array(
+    sdfg: dace.SDFG, name: str, target: str, placement: Placement, pending: list[MpiBuffer] | None = None
+) -> None:
     """Move ``name``'s accesses to ``target`` (described in ``sdfg``) through ``placement``. An argument
     keeps its descriptor for the caller and is converted into the target at the start (when read, or
     written only in part: the conversion back must not overwrite the cells the program leaves) and back
@@ -787,7 +912,7 @@ def move_array(sdfg: dace.SDFG, name: str, target: str, placement: Placement) ->
     shape = [str(extent) for extent in desc.shape]
     read, written = is_read(sdfg, name), is_written(sdfg, name)
     keeps_cells = written and not fully_written(sdfg, name)
-    rewrite_accesses(sdfg, name, target, placement)
+    rewrite_accesses(sdfg, name, target, placement, pending=pending)
     if desc.transient:
         if name != target:
             sdfg.remove_data(name, validate=False)
@@ -807,9 +932,11 @@ def array_desc(sdfg: dace.SDFG, name: str) -> data.Array:
     return desc
 
 
-def relayout_array(sdfg: dace.SDFG, name: str, layout: IndexMap) -> str:
+def relayout_array(sdfg: dace.SDFG, name: str, layout: IndexMap, pending: list[MpiBuffer] | None = None) -> str:
     """Lay ``sdfg``'s array ``name`` out by ``layout`` (see the module docstring); returns the name the
-    program now works on (``name`` for a transient, ``laid_<name>`` for an argument)."""
+    program now works on (``name`` for a transient, ``laid_<name>`` for an argument). Its MPI buffers are
+    packed at once (:func:`pack_mpi_buffers`), or recorded in ``pending`` for the caller to pack once every
+    array is laid out."""
     desc = array_desc(sdfg, name)
     if layout.is_identity():
         return name
@@ -819,7 +946,10 @@ def relayout_array(sdfg: dace.SDFG, name: str, layout: IndexMap) -> str:
         sdfg.arrays[name] = laid_desc
     else:
         sdfg.add_datadesc(laid, laid_desc)
-    move_array(sdfg, name, laid, Laid(layout))
+    own = [] if pending is None else pending
+    move_array(sdfg, name, laid, Laid(layout), own)
+    if pending is None:
+        pack_mpi_buffers(own)
     propagation.propagate_memlets_sdfg(sdfg)
     return laid
 
@@ -1274,8 +1404,11 @@ def apply_requests(sdfg: dace.SDFG, requests: Requests) -> dict[str, str]:
             dim = stacked.get(op.array, last) if op.dim is None else op.dim
             unzip_array(sdfg, op.array, op.into, dim)
     laid_out = {op.array for op in requests.operations if isinstance(op, DigitOperation)}
+    pending: list[MpiBuffer] = []
     for name in sorted(laid_out):
         target = working.get(name, name)
         shape = [str(extent) for extent in arrays()[target].shape]
-        working[name] = relayout_array(sdfg, target, state.layout(name, shape))
+        working[name] = relayout_array(sdfg, target, state.layout(name, shape), pending)
+    pack_mpi_buffers(pending)
+    propagation.propagate_memlets_sdfg(sdfg)
     return working
