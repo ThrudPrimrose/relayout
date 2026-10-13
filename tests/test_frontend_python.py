@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from conftest import mpi_or_skip
+from conftest import LAYOUT_CASES, LAYOUT_SHAPE, mpi_or_skip
 from relayout.convert import from_layout, to_layout
 from relayout.frontends.python import LayoutError, Unzipped, Zipped, rewrite
 from relayout.layout import IndexMap
@@ -112,21 +112,28 @@ def test_zipped_and_unzipped_arrays_follow_their_new_arrays() -> None:
     np.testing.assert_array_equal(out_b, [5.0, 1.0, 5.0, 1.0])
 
 
-def exchange(comm: Any, A: np.ndarray) -> None:  # an mpi4py communicator
+def exchange(comm: Any, A: np.ndarray, N: int, M: int) -> None:  # an mpi4py communicator; N, M: A's shape symbols
     comm.Sendrecv(A[0, :], dest=0, recvbuf=A[2, :], source=0)
 
 
-def test_mpi_buffers_are_packed_and_unpacked() -> None:
+#: The layout cases numpy views without a copy, which an mpi4py buffer of the Python frontend needs.
+VIEWED_CASES = [case for case in LAYOUT_CASES if layout(LAYOUT_CASES[case], ("N", "M")).view() is not None]
+
+
+@pytest.mark.mpi
+@pytest.mark.parametrize("case", VIEWED_CASES)
+def test_mpi_buffers_are_packed_and_unpacked(case: str) -> None:
+    """A row sent from and received into an array in a viewed layout case moves the logical row."""
     MPI = mpi_or_skip()
 
-    sizes = {"N": 3, "M": 4}
-    transposed = layout([Permute("A", ("i1", "i0"))], ("N", "M"))
-    a = np.arange(12.0).reshape(3, 4)
+    sizes = dict(zip(("N", "M"), LAYOUT_SHAPE, strict=True))
+    laid = layout(LAYOUT_CASES[case], ("N", "M"))
+    a = np.arange(float(np.prod(LAYOUT_SHAPE))).reshape(LAYOUT_SHAPE)
     expected = a.copy()
     expected[2, :] = a[0, :]
-    stored = to_layout(a, transposed, sizes)
-    rewritten(exchange, {"A": transposed})(MPI.COMM_SELF, stored)
-    np.testing.assert_array_equal(from_layout(stored, transposed, sizes), expected)
+    stored = to_layout(a, laid, sizes)
+    rewritten(exchange, {"A": laid})(MPI.COMM_SELF, stored, **sizes)
+    np.testing.assert_array_equal(from_layout(stored, laid, sizes), expected)
 
 
 if __name__ == "__main__":
@@ -135,6 +142,7 @@ if __name__ == "__main__":
     test_a_cut_array_used_whole_is_refused_by_its_line()
     test_zipped_and_unzipped_arrays_follow_their_new_arrays()
     try:
-        test_mpi_buffers_are_packed_and_unpacked()
+        for name in VIEWED_CASES:
+            test_mpi_buffers_are_packed_and_unpacked(name)
     except pytest.skip.Exception as skipped:
         print(f"skipped: {skipped}")

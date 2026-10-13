@@ -7,7 +7,7 @@ import copy
 import dace
 import numpy as np
 import pytest
-from conftest import variant
+from conftest import LAYOUT_CASES, variant
 from dace import nodes
 from dace.libraries.blas.nodes.symm import Symm
 from dace.libraries.blas.nodes.syrk import Syrk
@@ -57,6 +57,20 @@ def test_laid_out_arguments_and_transients_compute_the_same(a_ops: list, b_ops: 
     relayout_array(sdfg, "tmp", layout(tmp_ops, shape))
     sdfg.validate()
     a = np.random.default_rng(0).standard_normal((6, 12))
+    b = np.zeros((6, 12))
+    sdfg(A=a, B=b, N=6, M=12)
+    np.testing.assert_allclose(b, reference(a))
+
+
+@pytest.mark.parametrize("case", LAYOUT_CASES)
+def test_every_layout_case_computes_the_same_on_arguments_and_transients(case: str) -> None:
+    """End to end: one layout case on the input, the output and the transient of a compiled program."""
+    sdfg = stencil.to_sdfg(simplify=True)
+    variant(sdfg, f"case_{case}")
+    for name in ("A", "B", "tmp"):
+        relayout_array(sdfg, name, layout(LAYOUT_CASES[case], ["N", "M"]))
+    sdfg.validate()
+    a = np.random.default_rng(1).standard_normal((6, 12))
     b = np.zeros((6, 12))
     sdfg(A=a, B=b, N=6, M=12)
     np.testing.assert_allclose(b, reference(a))
@@ -267,5 +281,7 @@ if __name__ == "__main__":
     test_laid_out_arguments_and_transients_compute_the_same(
         [Permute("A", ("i1", "i0"))], [Pad("A", "i0", "2")], [Permute("A", ("i1", "i0"))]
     )
+    for name in LAYOUT_CASES:
+        test_every_layout_case_computes_the_same_on_arguments_and_transients(name)
     test_a_json_request_lays_out_the_program()
     test_a_library_node_without_a_rule_is_refused()

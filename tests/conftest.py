@@ -6,6 +6,8 @@ from typing import Any
 
 import pytest
 
+from relayout.ops import Block, LinearShuffle, Operation, Pad, Permute, Shuffle
+
 
 def mpi_or_skip() -> Any:  # noqa: ANN401  # the mpi4py.MPI module
     """mpi4py's ``MPI``, or a skip when the ``mpi`` extra or an MPI library is missing."""
@@ -32,3 +34,25 @@ def variant(sdfg: object, suffix: str) -> None:
     in a process, so a second variant of a program under the same name would run the first's library."""
     for inner in sdfg.all_sdfgs_recursive():  # type: ignore[attr-defined]
         inner.name = f"{inner.name}_{suffix}"
+
+
+#: Every single-node digit operation on a 2-D array ``A`` (rows ``i0``, columns ``i1``; ``split`` only lays bands out
+#: for a distribution, tests/test_ops.py), alone and composed: the cases each
+#: layout check (index map, conversion kernels, MPI transfers) runs over. Valid at any extents, so the MPI tests
+#: use them on ``[P, N]``; the fixed-shape tests use :data:`LAYOUT_SHAPE`, where ``block_ragged`` leaves dead cells.
+LAYOUT_CASES: dict[str, list[Operation]] = {
+    "permute": [Permute("A", ("i1", "i0"))],
+    "block": [Block("A", "i1", "2", ("o", "f"))],
+    "block_ragged": [Block("A", "i1", "4", ("o", "f"))],
+    "pad": [Pad("A", "i1", "3")],
+    "shuffle": [Block("A", "i1", "2", ("o", "f")), Shuffle("A", ("f",), ("1 - f",), ("1 - f",))],
+    "linear_shuffle": [
+        Block("A", "i1", "2", ("o", "c")),
+        Block("A", "i0", "2", ("r", "w")),
+        LinearShuffle("A", ("w", "c"), (1, 1), ((1, 0), (1, 1))),
+    ],
+    "composed": [Block("A", "i1", "2", ("o", "f")), Pad("A", "i0", "1"), Permute("A", ("o", "i0", "f"))],
+}
+
+#: The logical shape the fixed-shape layout checks use.
+LAYOUT_SHAPE = (4, 6)

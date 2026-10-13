@@ -456,6 +456,10 @@ class DigitTuple:
             self.find(name)
         grid = {name: str(value) for name, value in self.names.items()}
         f, f_inv = (tuple(substitute(expr, grid) for expr in exprs) for exprs in (f, f_inv))
+        last = self.renumbers[-1] if self.renumbers else None
+        if last is not None and last.axes == tuple(names) and (last.f, last.f_inv) == (f_inv, f):
+            self.renumbers.pop()  # the inverse of the last renumbering: the digits are as they were before it
+            return
         for expr in (*f, *f_inv):
             if any(is_root(node) and node_names(node) for node in ast.walk(ast.parse(expr, mode="eval"))):
                 raise ValueError(f"{self.where}: {expr!r}: root() takes grid expressions only, not digit values")

@@ -7,6 +7,7 @@ import itertools
 import numpy as np
 import pytest
 
+from conftest import LAYOUT_CASES, LAYOUT_SHAPE
 from relayout.layout import IndexMap
 from relayout.ops import (
     ArraySpec,
@@ -19,6 +20,7 @@ from relayout.ops import (
     Shuffle,
     Split,
     eval_index,
+    inverse_sequence,
     run,
 )
 
@@ -104,9 +106,21 @@ def test_a_distributed_digit_leaves_the_rank_local_layout() -> None:
         layout_of([Split("A", "i0", "P0", ("r", "i0"))], (8,), (4,))
 
 
+@pytest.mark.parametrize("case", LAYOUT_CASES)
+def test_every_layout_case_is_a_bijection_its_inverses_undo(case: str) -> None:
+    """Every logical cell lands on one live cell and comes back (:func:`placement`), every dead cell reads as
+    dead, and the operations followed by their inverses leave the identity."""
+    ops = LAYOUT_CASES[case]
+    placed = placement(layout_of(ops, LAYOUT_SHAPE), LAYOUT_SHAPE)
+    assert sorted(placed[placed >= 0]) == list(range(np.prod(LAYOUT_SHAPE)))
+    assert layout_of([*ops, *inverse_sequence(ops, len(LAYOUT_SHAPE))], LAYOUT_SHAPE).is_identity()
+
+
 if __name__ == "__main__":
     test_permute_and_block_are_numpys_transpose_and_reshape()
     test_a_ragged_block_and_a_pad_leave_dead_cells()
     test_shuffles_renumber_their_digits_and_come_back()
     test_a_shuffle_that_is_not_a_bijection_is_refused()
     test_a_distributed_digit_leaves_the_rank_local_layout()
+    for name in LAYOUT_CASES:
+        test_every_layout_case_is_a_bijection_its_inverses_undo(name)

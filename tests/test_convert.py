@@ -13,6 +13,7 @@ import ml_dtypes
 import numpy as np
 import pytest
 
+from conftest import LAYOUT_CASES, LAYOUT_SHAPE
 from relayout.convert import Conversion, Group, Member, compile_host, device_source, host_source
 from relayout.layout import IndexMap
 from relayout.ops import ArraySpec, Block, Pad, Permute, Shuffle, eval_index, run
@@ -123,6 +124,23 @@ def test_a_shuffle_keeps_python_floor_semantics_and_its_buffer(tmp_path: pathlib
     np.testing.assert_array_equal(stored[4], 0.0)  # row 4 holds row 5, which the array has not
 
 
+@pytest.mark.parametrize("case", LAYOUT_CASES)
+def test_every_layout_case_packs_and_unpacks_in_c(case: str, tmp_path: pathlib.Path) -> None:
+    """The C kernels pack each layout case cell for cell as its index map places it, dead cells zero, and
+    unpack it back to the logical array."""
+    layout = layout_for(LAYOUT_CASES[case], LAYOUT_SHAPE)
+    conversion = Conversion("A", layout, "float64", "float64")
+    lib = build([conversion], tmp_path)
+    logical = np.random.default_rng(3).standard_normal(LAYOUT_SHAPE)
+    sizes = dict(zip(("N", "M"), LAYOUT_SHAPE, strict=True))
+    stored = np.full(placed(layout, logical).shape, np.nan)
+    call(lib, "relayout_in_A", conversion, logical, stored, **sizes)
+    np.testing.assert_array_equal(stored, placed(layout, logical))
+    back = np.full_like(logical, np.nan)
+    call(lib, "relayout_out_A", conversion, stored, back, **sizes)
+    np.testing.assert_array_equal(back, logical)
+
+
 def test_complex_arrays_cast_their_parts(tmp_path: pathlib.Path) -> None:
     conversion = Conversion("z", layout_for([Permute("A", ("i1", "i0"))], (3, 4)), "complex128", "complex64")
     lib = build([conversion], tmp_path)
@@ -204,6 +222,9 @@ if __name__ == "__main__":
         test_a_layout_and_a_cast_are_one_pass_both_ways(pathlib.Path(tmp))
     with tempfile.TemporaryDirectory() as tmp:
         test_a_shuffle_keeps_python_floor_semantics_and_its_buffer(pathlib.Path(tmp))
+    for name in LAYOUT_CASES:
+        with tempfile.TemporaryDirectory() as tmp:
+            test_every_layout_case_packs_and_unpacks_in_c(name, pathlib.Path(tmp))
     with tempfile.TemporaryDirectory() as tmp:
         test_complex_arrays_cast_their_parts(pathlib.Path(tmp))
     with tempfile.TemporaryDirectory() as tmp:

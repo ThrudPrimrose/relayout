@@ -1,4 +1,4 @@
-# relayout CI: pre-commit, the test suite, and the MPI tests on two ranks.
+# relayout CI: the suite without MPI, and the MPI tests on two ranks.
 name: ci
 on:
   push:
@@ -9,6 +9,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   test:
+    name: pre-commit + tests (no MPI)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -16,13 +17,25 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.14"
-      # DaCe builds through CMake + Ninja; the MPI tests need an MPI library for mpi4py.
-      - run: sudo apt-get update && sudo apt-get install -y ninja-build libopenmpi-dev openmpi-bin
-      - run: uv sync --locked --extra mpi --extra fparena
+      # DaCe builds through CMake + Ninja.
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - run: uv sync --locked --extra fparena
       - run: uv run --no-sync pre-commit run --all-files
       - run: uv run --no-sync pytest -q -rfEs tests
         env:
           OMP_NUM_THREADS: "1"
-      - run: mpirun -n 2 --oversubscribe uv run --no-sync pytest -q -rfEs tests/test_frontend_sdfg_mpi.py tests/test_omen_sse_mpi.py
+  mpi:
+    name: MPI tests (2 ranks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.14"
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build libopenmpi-dev openmpi-bin
+      - run: uv sync --locked --extra mpi
+      # Pack / unpack of every layout case around an Alltoall, and OMEN SSE end to end (laid out and not).
+      - run: mpirun -n 2 --oversubscribe .venv/bin/python -m pytest -q -rfEs -m mpi tests
         env:
           OMP_NUM_THREADS: "1"

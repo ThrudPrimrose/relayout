@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 import dace
-from conftest import mpi_or_skip
+from conftest import LAYOUT_CASES, mpi_or_skip, variant
 from dace import nodes
 from relayout.frontends.sdfg import relayout_array
 from relayout.ops import ArraySpec, Pad, Permute, run
@@ -42,16 +42,15 @@ def test_a_transfer_of_a_laid_out_array_goes_through_a_packed_buffer() -> None:
     assert maps == ["pack_packed_laid_A_map", "unpack_packed_laid_B_map"]
 
 
-@pytest.mark.mpi
-def test_the_exchange_moves_the_logical_rows() -> None:
+def check_exchange(sdfg: dace.SDFG, n: int) -> None:
+    """``sdfg`` (the exchange, laid out) run on every rank moves row r of each rank's A to rank r."""
     comm = mpi_or_skip().COMM_WORLD
     size, rank = comm.Get_size(), comm.Get_rank()
     if size < 2:
         pytest.skip("needs mpirun -n >= 2")
     from dace.sdfg.utils import distributed_compile  # noqa: PLC0415  # MPI-only
 
-    function = distributed_compile(laid_out_exchange(), comm)
-    n = 3
+    function = distributed_compile(sdfg, comm)
     a = np.arange(size * n, dtype=np.float64).reshape(size, n) + 100 * rank
     b = np.zeros((size, n))
     function(A=a, B=b, P=size, N=n)
@@ -59,9 +58,28 @@ def test_the_exchange_moves_the_logical_rows() -> None:
     np.testing.assert_array_equal(b, expected)
 
 
+@pytest.mark.mpi
+def test_the_exchange_moves_the_logical_rows() -> None:
+    check_exchange(laid_out_exchange(), 3)
+
+
+@pytest.mark.mpi
+@pytest.mark.parametrize("case", LAYOUT_CASES)
+def test_every_layout_case_packs_and_unpacks_around_the_exchange(case: str) -> None:
+    """Both buffers of the Alltoall in one layout case: packed in the logical order, unpacked into it."""
+    sdfg = exchange.to_sdfg(simplify=True)
+    variant(sdfg, f"case_{case}")
+    laid = run(LAYOUT_CASES[case], [ArraySpec("A", 2)], (), "ops").layout("A", ["P", "N"])
+    relayout_array(sdfg, "A", laid)
+    relayout_array(sdfg, "B", laid)
+    check_exchange(sdfg, 6)
+
+
 if __name__ == "__main__":
     test_a_transfer_of_a_laid_out_array_goes_through_a_packed_buffer()
     try:
         test_the_exchange_moves_the_logical_rows()
+        for name in LAYOUT_CASES:
+            test_every_layout_case_packs_and_unpacks_around_the_exchange(name)
     except pytest.skip.Exception as skipped:
         print(f"skipped: {skipped}")

@@ -6,7 +6,9 @@ import numpy as np
 import pytest
 
 from conftest import flang_missing, mpi_or_skip
+from relayout.frontends.sdfg import apply_requests
 from relayout.kernels import omen_sse
+from relayout.requests import parse_requests
 
 pytestmark = pytest.mark.mpi
 HERE = Path(omen_sse.__file__).parent
@@ -73,6 +75,39 @@ def test_python_frontend_mpi():
     np.testing.assert_allclose(Sigmal, expected, rtol=1e-12)
 
 
+#: G atom-major and dH direction-innermost (the quickstart's node layout), and the Alltoall's send and recv buffers
+#: blocked and reordered, so the transfer packs from and unpacks into a layout.
+LAID_OUT = {
+    "operations": [
+        {"action": "permute", "array": "Gl", "order": ["i2", "i0", "i1", "i3", "i4"]},
+        {"action": "permute", "array": "dH", "order": ["i0", "i1", "i3", "i4", "i2"]},
+        {"action": "permute", "array": "send", "order": ["i1", "i0", "i2", "i3", "i4", "i5"]},
+        {"action": "block", "array": "recv", "digit": "i2", "factor": 2, "into": ["eo", "ei"]},
+        {"action": "permute", "array": "recv", "order": ["i1", "eo", "i0", "ei", "i3", "i4", "i5"]},
+    ]
+}
+
+
+def test_a_laid_out_kernel_runs_distributed():
+    """End to end: the distributed SSE with its arguments and its Alltoall buffers laid out computes the
+    reference on every rank."""
+    from relayout.kernels.omen_sse.sse_mpi import sse_mpi
+
+    comm = comm_or_skip()
+    args, expected, sizes = local_problem(comm)
+
+    def build():
+        sdfg = sse_mpi.to_sdfg(simplify=True)
+        sdfg.name = "sse_mpi_laid_out"
+        apply_requests(sdfg, parse_requests(LAID_OUT))
+        return sdfg
+
+    func = build_on_root(comm, build)
+    Sigmal = np.zeros_like(expected)
+    func(**args, Sigmal=Sigmal, NE=SIZE["NE"], **sizes)
+    np.testing.assert_allclose(Sigmal, expected, rtol=1e-12)
+
+
 @pytest.mark.fortran
 @pytest.mark.skipif(flang_missing(), reason="no dace-fortran (extra 'fortran') or no LLVM flang")
 def test_fortran_frontend_mpi(tmp_path_factory):
@@ -97,5 +132,6 @@ def test_fortran_frontend_mpi(tmp_path_factory):
 if __name__ == "__main__":
     try:
         test_python_frontend_mpi()
+        test_a_laid_out_kernel_runs_distributed()
     except pytest.skip.Exception as skipped:
         print(f"skipped: {skipped}")
