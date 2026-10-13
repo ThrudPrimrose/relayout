@@ -11,9 +11,8 @@
 #ifndef RELAYOUT_FP_H
 #define RELAYOUT_FP_H
 
-#if defined(__CUDACC__) || defined(__HIPCC__) || defined(__CUDACC_RTC__) || defined(__HIPCC_RTC__)
-#define RELAYOUT_HD __host__ __device__
-#define RELAYOUT_MEMCPY __builtin_memcpy
+#if defined(__CUDACC_RTC__) || defined(__HIPCC_RTC__)
+/* NVRTC and hipRTC compile without the C library's headers. */
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -23,6 +22,11 @@ typedef int int32_t;
 #else
 #include <stdint.h>
 #include <string.h>
+#endif
+#if defined(__CUDACC__) || defined(__HIPCC__) || defined(__CUDACC_RTC__) || defined(__HIPCC_RTC__)
+#define RELAYOUT_HD __host__ __device__
+#define RELAYOUT_MEMCPY __builtin_memcpy
+#else
 #define RELAYOUT_HD
 #define RELAYOUT_MEMCPY memcpy
 #endif
