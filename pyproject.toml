@@ -32,8 +32,7 @@ dev = ["pytest", "pytest-timeout", "ruff", "pre-commit", "ml-dtypes"]
 # dace comes from the override below, not from a source: uv applies a git dependency's sources, so a dace source here
 # would conflict with the dace commit a project that depends on relayout (hpcagent-bench) pins.
 dace-fortran = { git = "https://github.com/spcl/dace-fortran.git", branch = "main" }
-# spcl/FP-Arena#10 (follows dace@extended's nodes.copy package and states()) until it merges.
-fp-arena = { git = "https://github.com/spcl/FP-Arena.git", rev = "a7ec5ed67d62aa6f954db991ce2aebfa9d04cdbd" }
+fp-arena = { git = "https://github.com/spcl/FP-Arena.git", rev = "810eca0e7d56ac35bd38bf108c1a96c8cecf9775" }
 
 [tool.uv]
 # relayout as the root project: dace@extended, also over the dace@FaCe dace-fortran pins.
