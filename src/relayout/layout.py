@@ -125,11 +125,13 @@ class Axis:
 @dataclass(frozen=True, slots=True)
 class Renumber:
     """A bijection over the values of ``axes``: ``f`` (one expression per axis, over the axis names)
-    gives the stored values, ``f_inv`` the live ones back."""
+    gives the stored values, ``f_inv`` the live ones back. ``checked``: proven a bijection of the axes'
+    values; otherwise :meth:`IndexMap.live` bounds every value ``f_inv`` gives back."""
 
     axes: tuple[str, ...]
     f: tuple[str, ...]
     f_inv: tuple[str, ...]
+    checked: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,11 +179,21 @@ class IndexMap:
 
     def live(self, position: Sequence[str]) -> tuple[str, ...]:
         """The conditions under which the physical ``position`` holds a cell of the array: every padded
-        axis below its live extent and every blocked dimension below its shape (empty = always)."""
+        axis below its live extent, every value an unchecked renumbering gives back within its axis, and
+        every blocked dimension below its shape (empty = always)."""
         values = {axis.name: value for axis, value in zip(self.axes, position, strict=True)}
+        unchecked: set[str] = set()
         for renumber in reversed(self.renumbers):
             values.update(zip(renumber.axes, (substitute(e, values) for e in renumber.f_inv), strict=True))
-        conditions = [f"{wrap(values[axis.name])} < {wrap(self.live_extent(axis))}" for axis in self.axes if axis.pad]
+            if not renumber.checked:
+                unchecked.update(renumber.axes)
+        conditions = []
+        for axis in self.axes:
+            value, extent = wrap(values[axis.name]), wrap(self.live_extent(axis))
+            if axis.name in unchecked:
+                conditions += [f"-1 < {value}", f"{value} < {extent}"]
+            elif axis.pad:
+                conditions.append(f"{value} < {extent}")
         logical = self.logical(position)
         for dim, extent in enumerate(self.shape):
             own = [axis for axis in self.axes if axis.dim == dim]

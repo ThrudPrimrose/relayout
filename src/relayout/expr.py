@@ -8,7 +8,16 @@ import operator
 from collections.abc import Callable, Mapping
 from typing import Any
 
-__all__ = ["BINOP_FUNCTIONS", "INDEX_CALLS", "check_index_expr", "eval_index", "evaluate", "int_root"]
+__all__ = [
+    "BINOP_FUNCTIONS",
+    "INDEX_CALLS",
+    "check_index_expr",
+    "eval_index",
+    "evaluate",
+    "int_root",
+    "is_root",
+    "node_names",
+]
 
 #: The operators an index expression may use: integer arithmetic, floor and mod, and the bitwise ones
 #: XOR swizzles need.
@@ -44,6 +53,17 @@ INDEX_CALLS: dict[str, tuple[int, Callable[..., int]]] = {
     "max": (2, max),
     "root": (2, int_root),
 }
+
+
+def is_root(node: ast.AST) -> bool:
+    """Whether ``node`` calls ``root``."""
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "root"
+
+
+def node_names(node: ast.AST) -> set[str]:
+    """The names ``node``'s arguments read (a call's function name aside)."""
+    calls = {id(walked.func) for walked in ast.walk(node) if isinstance(walked, ast.Call)}
+    return {walked.id for walked in ast.walk(node) if isinstance(walked, ast.Name) and id(walked) not in calls}
 
 
 def check_index_expr(text: str, where: str) -> str:

@@ -220,6 +220,28 @@ def convert(
     return scheme, gather(scheme, data), csr
 
 
+def encode_into(
+    fmt: SparseFormat,
+    buffers: Mapping[str, Index],
+    shape: tuple[int, int],
+    csr: Csr,
+    values: npt.NDArray[np.generic],
+    out: npt.NDArray[np.generic],
+) -> None:
+    """Write ``values`` (one per entry of ``csr``) into ``out``, the value buffer ``fmt``'s ``buffers`` index:
+    every slot of an entry takes its value (the first slot of a duplicated entry, the later ones zero, so the
+    sum :func:`decode` reads is kept) and a slot outside the matrix keeps what it held."""
+    flat = out.reshape(-1).copy()
+    row, col, slot = coordinates(fmt, buffers, shape, flat.size)
+    cols = shape[1]
+    entries = np.repeat(np.arange(shape[0], dtype=np.int64), np.diff(csr.indptr)) * cols + csr.indices
+    keys = row * cols + col
+    first = np.zeros(keys.size, dtype=bool)
+    first[np.unique(keys, return_index=True)[1]] = True
+    flat[slot] = np.where(first, values[np.searchsorted(entries, keys)], 0)
+    out[...] = flat.reshape(out.shape)
+
+
 def boundary(
     program: Callable[..., object],
     name: str,
@@ -245,8 +267,7 @@ def boundary(
         arguments[f"{name}_data"] = stored
         result = program(**arguments)
         if written:
-            back = plan(csr, given)
-            data[...] = gather(back, scatter(scheme, stored, csr.nnz)).reshape(data.shape)
+            encode_into(given, buffers, matrix, csr, scatter(scheme, stored, csr.nnz), data)
         return result
 
     return call

@@ -31,6 +31,15 @@ typedef int int32_t;
 #define RELAYOUT_MEMCPY memcpy
 #endif
 
+/* Python's floor division and remainder, for an index expression whose operand can be negative. */
+static inline RELAYOUT_HD int64_t relayout_floordiv(int64_t a, int64_t b) {
+    const int64_t q = a / b;
+    return q - ((a % b != 0) && ((a < 0) != (b < 0)));
+}
+static inline RELAYOUT_HD int64_t relayout_floormod(int64_t a, int64_t b) {
+    return a - b * relayout_floordiv(a, b);
+}
+
 typedef struct { float re, im; } relayout_c64;
 typedef struct { double re, im; } relayout_c128;
 

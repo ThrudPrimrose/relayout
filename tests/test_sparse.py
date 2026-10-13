@@ -150,6 +150,14 @@ def test_a_program_written_for_one_format_is_called_with_another() -> None:
     call = boundary(scale_values, "A", SparseFormat.parse("coo"), SparseFormat.parse("csc"), ("N", "M"), written=True)
     call(A_row=coo.buffers["row"], A_col=coo.buffers["col"], A_data=data, N=7, M=5)
     np.testing.assert_allclose(data, 2.0 * values)
+    order = np.random.default_rng(3).permutation(values.size)
+    row, col = coo.buffers["row"][order], coo.buffers["col"][order]
+    row, col = np.append(row, row[0]), np.append(col, col[0])
+    data = np.append(values[order], 1.0)  # unsorted, and its first entry twice
+    call(A_row=row, A_col=col, A_data=data, N=7, M=5)
+    want = np.append(2.0 * values[order], 0.0)
+    want[0] = 2.0 * (values[order][0] + 1.0)
+    np.testing.assert_allclose(data, want)
 
 
 if __name__ == "__main__":

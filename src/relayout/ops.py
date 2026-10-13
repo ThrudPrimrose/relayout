@@ -17,6 +17,7 @@ its checks and its effect live in one place, and :mod:`relayout.requests` maps i
 not cover yet is refused by name, never approximated. Design: docs/layout.md.
 """
 
+import ast
 import dataclasses
 import enum
 import itertools
@@ -28,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple, NewType, NoReturn
 
 from relayout.convert import ELEMENTS
-from relayout.expr import check_index_expr, eval_index
+from relayout.expr import check_index_expr, eval_index, is_root, node_names
 from relayout.layout import Axis, IndexMap, Renumber, substitute
 
 __all__ = [
@@ -447,10 +448,14 @@ class DigitTuple:
             self.find(name)
         grid = {name: str(value) for name, value in self.names.items()}
         f, f_inv = (tuple(substitute(expr, grid) for expr in exprs) for exprs in (f, f_inv))
+        for expr in (*f, *f_inv):
+            if any(is_root(node) and node_names(node) for node in ast.walk(ast.parse(expr, mode="eval"))):
+                raise ValueError(f"{self.where}: {expr!r}: root() takes grid expressions only, not digit values")
         extents = [self.digits[self.find(name)].extent for name in names]
-        if all(extent is not None for extent in extents) and math.prod(extents) <= BIJECTION_CHECK_LIMIT:  # type: ignore[arg-type]
+        checked = all(extent is not None for extent in extents) and math.prod(extents) <= BIJECTION_CHECK_LIMIT  # type: ignore[arg-type]
+        if checked:
             check_bijection(names, extents, f, f_inv, self.where)  # type: ignore[arg-type]
-        self.renumbers.append(Renumber(tuple(names), f, f_inv))
+        self.renumbers.append(Renumber(tuple(names), f, f_inv, checked))
 
     def replace(self, position: int, new: Sequence[Digit]) -> None:
         """Put ``new`` where the digit at ``position`` was; their names must not clash with the others'."""
@@ -464,6 +469,15 @@ class DigitTuple:
         """Cut digit ``name`` ``(d, s, e)`` into coarse ``(d, s*b, ceil(e/b))`` and fine ``(d, s, b)``, in place."""
         old = self.cut(name)
         position = self.find(name)
+        coarser = any(
+            d.dim == old.dim and (d.band or d.stride > old.stride)
+            for d in (*self.digits, *(digit for digit, _ in self.distributed))
+        )
+        if coarser and old.extent is not None and factor is not None and old.extent % factor:
+            raise ValueError(
+                f"{self.where}: {name!r} has extent {old.extent}, which {factor} does not divide; only a dimension's "
+                "outermost digit pads, so block an inner digit by a divisor of its extent"
+            )
         outer = None if old.extent is None or factor is None else math.ceil(old.extent / factor)
         coarse = Digit(into[0], old.dim, old.stride * (factor or 0), outer, old.band)
         self.replace(position, [coarse, Digit(into[1], old.dim, old.stride, factor)])
@@ -601,6 +615,7 @@ class ArrayState:
         "fields",
         "format",
         "location",
+        "member_elements",
         "members",
         "name",
         "native",
@@ -625,6 +640,8 @@ class ArrayState:
         self.field_dim = 0
         #: A struct's fields with their precisions (None = the problem precision).
         self.members = members or tuple((member, None) for member in spec.members)
+        #: A zipped struct's members' problem element types, in order (empty: a native struct's are its component).
+        self.member_elements: tuple[str | None, ...] = ()
         self.native = spec.native
         self.precision: Precision | None = None
         self.element = spec.element
@@ -818,6 +835,7 @@ class Zip(Operation):
         else:
             members = tuple((field.name, field.precision) for field in fields)
             zipped = ArrayState(ArraySpec(self.into, ndim), state.grid, state.where, members)
+            zipped.member_elements = tuple(field.element for field in fields)
         zipped.location = locations.pop()
         state.arrays[self.into] = zipped
 
@@ -851,9 +869,10 @@ class Unzip(Operation):
             parts = [(name, whole.precision, whole.element) for name in self.into]
         else:
             component = ELEMENTS[whole.element].component if whole.element in ELEMENTS else None
+            elements = whole.member_elements or (component,) * len(whole.members)
             extent, parts = (
                 len(whole.members),
-                [(name, p, component) for name, (_, p) in zip(self.into, whole.members, strict=False)],
+                [(name, p, e) for name, (_, p), e in zip(self.into, whole.members, elements, strict=False)],
             )
             if not whole.members:
                 raise ValueError(
@@ -1020,7 +1039,8 @@ class Unpad(DigitOperation):
 @dataclass(frozen=True, slots=True)
 class Shuffle(DigitOperation):
     """Renumber the digits ``digits`` by the bijection ``f`` (one expression per digit, over their names);
-    the caller supplies its inverse ``f_inv``, checked exhaustively before the build."""
+    the caller supplies its inverse ``f_inv``, checked exhaustively where the digits' extents are known
+    (otherwise the kernels bound every value ``f_inv`` gives back, so a wrong one cannot leave the buffer)."""
 
     action: ClassVar[Action] = Action.SHUFFLE
     lowers: ClassVar[bool] = False

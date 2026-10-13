@@ -164,6 +164,18 @@ def test_a_zip_compares_element_types_not_casts() -> None:
     complex_z = [ArraySpec("Z", 1, members=("re", "im"), native=True, element="complex128")]
     parts = run([Unzip("Z", ("re", "im"))], complex_z, (), "operations").arrays
     assert [part.element_type for part in parts.values()] == ["float64", "float64"]
+    mixed_back = [Zip(("a", "b"), "z"), Unzip("z", ("a2", "b2"))]
+    back = run(mixed_back, mixed, (), "operations").arrays
+    assert [back[name].element_type for name in ("a2", "b2")] == ["float64", "float32"]
+
+
+def test_an_inner_digit_blocks_only_by_a_divisor_of_its_extent() -> None:
+    """Only a dimension's outermost digit pads: cutting an inner one by a non-divisor would store cells twice."""
+    ops = [Block("A", "i0", "4", ("a", "b")), Block("A", "b", "3", ("c", "d"))]
+    with pytest.raises(ValueError, match="which 3 does not divide"):
+        run(ops, [ArraySpec("A", 1)], (), "operations")
+    with pytest.raises(ValueError, match="root"):
+        run([Shuffle("A", ("i0",), ("root(i0, 2)",), ("i0",))], [ArraySpec("A", 1)], (), "operations")
 
 
 def test_unzip_along_a_dimension_splits_an_array() -> None:
@@ -322,6 +334,7 @@ if __name__ == "__main__":
     test_operations_see_what_the_previous_ones_left()
     test_a_zip_of_one_precision_is_a_field_dimension()
     test_a_zip_compares_element_types_not_casts()
+    test_an_inner_digit_blocks_only_by_a_divisor_of_its_extent()
     test_unzip_along_a_dimension_splits_an_array()
     test_a_complex_array_is_one_element_and_a_struct()
     test_a_non_row_major_local_order_is_refused_with_the_permute_that_fixes_it()

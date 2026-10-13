@@ -15,7 +15,7 @@ import pytest
 
 from relayout.convert import Conversion, Group, Member, compile_host, device_source, host_source
 from relayout.layout import IndexMap
-from relayout.ops import ArraySpec, Block, Pad, Permute, eval_index, run
+from relayout.ops import ArraySpec, Block, Pad, Permute, Shuffle, eval_index, run
 
 NARROW = {
     "float16": np.dtype(np.float16),
@@ -104,6 +104,25 @@ def test_a_layout_and_a_cast_are_one_pass_both_ways(tmp_path: pathlib.Path) -> N
     np.testing.assert_array_equal(back, logical.astype(np.float32).astype(np.float64))
 
 
+def test_a_shuffle_keeps_python_floor_semantics_and_its_buffer(tmp_path: pathlib.Path) -> None:
+    """A rotation whose inverse subtracts (C's ``%`` would give -1) packs like the layout's own maps, and an
+    unchecked swizzle over a dimension of odd extent leaves the cell it maps out of the array dead."""
+    rotate = Shuffle("A", ("f",), ("(f + 1) % 4",), ("(f - 1) % 4",))
+    swizzle = Shuffle("A", ("i0",), ("i0 ^ 1",), ("i0 ^ 1",))
+    logical = np.random.default_rng(2).standard_normal((5, 8))
+    layout = layout_for([Block("A", "i1", "4", ("o", "f")), rotate], (5, 8))
+    conversion = Conversion("A", layout, "float64", "float64")
+    swizzled = Conversion("B", layout_for([swizzle], (5, 8)), "float64", "float64")
+    lib = build([conversion, swizzled], tmp_path)
+    stored = np.full(placed(layout, logical).shape, np.nan)
+    call(lib, "relayout_in_A", conversion, logical, stored, N=5, M=8)
+    np.testing.assert_array_equal(stored, placed(layout, logical))
+    stored = np.full((5, 8), np.nan)
+    call(lib, "relayout_in_B", swizzled, logical, stored, N=5, M=8)
+    np.testing.assert_array_equal(stored[:4], logical[[1, 0, 3, 2]])
+    np.testing.assert_array_equal(stored[4], 0.0)  # row 4 holds row 5, which the array has not
+
+
 def test_complex_arrays_cast_their_parts(tmp_path: pathlib.Path) -> None:
     conversion = Conversion("z", layout_for([Permute("A", ("i1", "i0"))], (3, 4)), "complex128", "complex64")
     lib = build([conversion], tmp_path)
@@ -183,6 +202,8 @@ if __name__ == "__main__":
             test_every_narrow_format_rounds_like_numpy(source, pathlib.Path(tmp))
     with tempfile.TemporaryDirectory() as tmp:
         test_a_layout_and_a_cast_are_one_pass_both_ways(pathlib.Path(tmp))
+    with tempfile.TemporaryDirectory() as tmp:
+        test_a_shuffle_keeps_python_floor_semantics_and_its_buffer(pathlib.Path(tmp))
     with tempfile.TemporaryDirectory() as tmp:
         test_complex_arrays_cast_their_parts(pathlib.Path(tmp))
     with tempfile.TemporaryDirectory() as tmp:

@@ -20,7 +20,7 @@ from dataclasses import dataclass
 import numpy as np
 import numpy.typing as npt
 
-from relayout.expr import eval_index, evaluate
+from relayout.expr import eval_index, evaluate, is_root, node_names
 from relayout.layout import IndexMap, linear
 
 __all__ = [
@@ -121,8 +121,15 @@ C_BINOPS = {
 }
 
 
+def may_be_negative(node: ast.expr) -> bool:
+    """Whether an index expression over non-negative names can be negative: only a subtraction or a
+    negation makes one."""
+    return any(isinstance(walked, (ast.Sub, ast.USub)) for walked in ast.walk(node))
+
+
 def c_expr(text: str) -> str:
-    """An index expression (non-negative operands) as C, fully parenthesized."""
+    """An index expression over non-negative names as C, fully parenthesized, with Python's floor ``//`` and
+    ``%`` (``relayout_floordiv`` / ``relayout_floormod`` where an operand can be negative, C's otherwise)."""
 
     def emit(node: ast.expr) -> str:
         if isinstance(node, ast.Constant) and isinstance(node.value, int):
@@ -131,6 +138,9 @@ def c_expr(text: str) -> str:
             return node.id
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
             return f"(-{emit(node.operand)})"
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.FloorDiv | ast.Mod) and may_be_negative(node):
+            helper = "relayout_floordiv" if isinstance(node.op, ast.FloorDiv) else "relayout_floormod"
+            return f"{helper}({emit(node.left)}, {emit(node.right)})"
         if isinstance(node, ast.BinOp) and type(node.op) in C_BINOPS:
             return f"({emit(node.left)} {C_BINOPS[type(node.op)]} {emit(node.right)})"
         if isinstance(node, ast.Compare) and len(node.ops) == 1 and isinstance(node.ops[0], ast.Lt):
@@ -138,6 +148,8 @@ def c_expr(text: str) -> str:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("min", "max"):
             a, b = (emit(arg) for arg in node.args)
             return f"(({a}) {'<' if node.func.id == 'min' else '>'} ({b}) ? ({a}) : ({b}))"
+        if is_root(node) and not node_names(node):
+            return f"{eval_index(ast.unparse(node), {}, text)}LL"
         raise ValueError(f"{text!r}: {ast.unparse(node)} has no C form here")
 
     return emit(ast.parse(text, mode="eval").body)
