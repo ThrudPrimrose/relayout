@@ -154,6 +154,18 @@ def test_a_zip_of_one_precision_is_a_field_dimension() -> None:
         run([Cast("x", Precision.FP32), Zip(("x", "y"), "q", dim=Dim(0))], xyz, (), "operations")
 
 
+def test_a_zip_compares_element_types_not_casts() -> None:
+    """Problem element types decide too: float64 and float32 make a struct uncast, and a cast to the
+    other's type stacks; unzipped parts keep the element type (a complex array's parts its component)."""
+    mixed = [ArraySpec("a", 1, element="float64"), ArraySpec("b", 1, element="float32")]
+    assert run([Zip(("a", "b"), "z")], mixed, (), "operations").arrays["z"].members
+    stacked = run([Cast("a", Precision.FP32), Zip(("a", "b"), "z")], mixed, (), "operations").arrays["z"]
+    assert stacked.fields == ("a", "b") and stacked.element_type == "float32"
+    complex_z = [ArraySpec("Z", 1, members=("re", "im"), native=True, element="complex128")]
+    parts = run([Unzip("Z", ("re", "im"))], complex_z, (), "operations").arrays
+    assert [part.element_type for part in parts.values()] == ["float64", "float64"]
+
+
 def test_unzip_along_a_dimension_splits_an_array() -> None:
     """One array per index of a small dimension, the inverse of a zip along it (the extent of a dimension
     no zip made is the frontend's to check)."""
@@ -309,6 +321,7 @@ if __name__ == "__main__":
     test_the_default_layout_raises_to_operations_that_lower_back(3)
     test_operations_see_what_the_previous_ones_left()
     test_a_zip_of_one_precision_is_a_field_dimension()
+    test_a_zip_compares_element_types_not_casts()
     test_unzip_along_a_dimension_splits_an_array()
     test_a_complex_array_is_one_element_and_a_struct()
     test_a_non_row_major_local_order_is_refused_with_the_permute_that_fixes_it()

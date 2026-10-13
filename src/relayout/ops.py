@@ -27,6 +27,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple, NewType, NoReturn
 
+from relayout.convert import ELEMENTS
 from relayout.expr import check_index_expr, eval_index
 from relayout.layout import Axis, IndexMap, Renumber, substitute
 
@@ -149,6 +150,21 @@ class Precision(enum.Enum):
     BF16 = "bf16"
     FP8_E4M3 = "fp8_e4m3"
     FP8_E5M2 = "fp8_e5m2"
+
+    @property
+    def element(self) -> str:
+        """The element type's numpy name (:data:`relayout.convert.ELEMENTS`)."""
+        return PRECISION_ELEMENTS[self]
+
+
+PRECISION_ELEMENTS = {
+    Precision.FP64: "float64",
+    Precision.FP32: "float32",
+    Precision.FP16: "float16",
+    Precision.BF16: "bfloat16",
+    Precision.FP8_E4M3: "float8_e4m3fn",
+    Precision.FP8_E5M2: "float8_e5m2",
+}
 
 
 def grid_names(grid: Sequence[int]) -> dict[str, int]:
@@ -571,6 +587,8 @@ class ArraySpec:
     native: bool = False
     #: Each dimension's extent where it is known without the shape (a zipped array's field), else None.
     extents: tuple[int | None, ...] = ()
+    #: The problem element type's numpy name (:data:`relayout.convert.ELEMENTS`); None when unknown.
+    element: str | None = None
 
 
 class ArrayState:
@@ -578,6 +596,7 @@ class ArrayState:
 
     __slots__ = (
         "digits",
+        "element",
         "field_dim",
         "fields",
         "format",
@@ -608,11 +627,17 @@ class ArrayState:
         self.members = members or tuple((member, None) for member in spec.members)
         self.native = spec.native
         self.precision: Precision | None = None
+        self.element = spec.element
         self.format: str | None = None
         self.location: Location | None = None
         self.replicated = False
         #: Whether a digit operation, distribute or replicate has touched it.
         self.touched = False
+
+    @property
+    def element_type(self) -> str | None:
+        """The element type's numpy name as the casts so far leave it; None when unknown."""
+        return self.element if self.precision is None else self.precision.element
 
 
 class State:
@@ -751,10 +776,11 @@ class Format(Operation):
 @dataclass(frozen=True, slots=True)
 class Zip(Operation):
     """Fuse whole arrays ``arrays`` of one shape into one array ``into``, the inverse of :class:`Unzip`.
-    Arrays of one precision are stacked along a new dimension, the field, at position ``dim`` (None: last;
-    ``into[..., k]`` is ``arrays[k]``), which the digit operations then place like any other (field-outer is
-    SoA, field-inner AoS, blocked between AoSoA); arrays of different precisions become one array of
-    structs, one member per array in order, each keeping its precision (and take no ``dim``)."""
+    Arrays of one element type (:attr:`ArrayState.element_type`) are stacked along a new dimension, the field,
+    at position ``dim`` (None: last; ``into[..., k]`` is ``arrays[k]``), which the digit operations then place
+    like any other (field-outer is SoA, field-inner AoS, blocked between AoSoA); arrays of different element
+    types become one array of structs, one member per array in order, each keeping its precision (and take
+    no ``dim``)."""
 
     action: ClassVar[Action] = Action.ZIP
     lowers: ClassVar[bool] = False
@@ -775,19 +801,20 @@ class Zip(Operation):
         state.fresh(self.into)
         for name in self.arrays:
             del state.arrays[name]
-        ndim, precisions = ndims.pop(), {field.precision for field in fields}
+        ndim, elements = ndims.pop(), {field.element_type for field in fields}
         position = ndim if self.dim is None else self.dim
         if position > ndim:
             raise ValueError(
                 f"{state.where}: {ndim}-dimensional arrays stack along dimension 0 to {ndim}, not {position}"
             )
-        if len(precisions) != 1 and self.dim is not None:
-            raise ValueError(f"{state.where}: arrays of different precisions zip into a struct, which has no dim")
-        if len(precisions) == 1:
+        if len(elements) != 1 and self.dim is not None:
+            raise ValueError(f"{state.where}: arrays of different element types zip into a struct, which has no dim")
+        if len(elements) == 1:
             extents = [None] * ndim
             extents.insert(position, len(fields))
-            zipped = ArrayState(ArraySpec(self.into, ndim + 1, extents=tuple(extents)), state.grid, state.where)
-            zipped.fields, zipped.field_dim, zipped.precision = tuple(self.arrays), position, precisions.pop()
+            spec = ArraySpec(self.into, ndim + 1, extents=tuple(extents), element=elements.pop())
+            zipped = ArrayState(spec, state.grid, state.where)
+            zipped.fields, zipped.field_dim = tuple(self.arrays), position
         else:
             members = tuple((field.name, field.precision) for field in fields)
             zipped = ArrayState(ArraySpec(self.into, ndim), state.grid, state.where, members)
@@ -817,14 +844,16 @@ class Unzip(Operation):
             if self.dim >= ndim or (whole.members and not whole.native):
                 raise ValueError(f"{state.where}: {self.array!r} has no dimension {self.dim} to split along")
             extent = whole.digits.digits[self.dim].extent
-            parts = [(name, whole.precision) for name in self.into]
+            parts = [(name, whole.precision, whole.element) for name in self.into]
             ndim -= 1
         elif whole.fields:
-            extent, parts, ndim = len(whole.fields), [(name, whole.precision) for name in self.into], ndim - 1
+            extent, ndim = len(whole.fields), ndim - 1
+            parts = [(name, whole.precision, whole.element) for name in self.into]
         else:
+            component = ELEMENTS[whole.element].component if whole.element in ELEMENTS else None
             extent, parts = (
                 len(whole.members),
-                [(name, p) for name, (_, p) in zip(self.into, whole.members, strict=False)],
+                [(name, p, component) for name, (_, p) in zip(self.into, whole.members, strict=False)],
             )
             if not whole.members:
                 raise ValueError(
@@ -833,9 +862,9 @@ class Unzip(Operation):
         if extent is not None and extent != len(self.into):
             raise ValueError(f"{state.where}: {self.array!r} splits into {extent} array(s); name one per part")
         del state.arrays[self.array]
-        for name, precision in parts:
+        for name, precision, element in parts:
             state.fresh(name)
-            state.arrays[name] = ArrayState(ArraySpec(name, ndim), state.grid, state.where)
+            state.arrays[name] = ArrayState(ArraySpec(name, ndim, element=element), state.grid, state.where)
             state.arrays[name].precision = precision
             state.arrays[name].location = whole.location
 

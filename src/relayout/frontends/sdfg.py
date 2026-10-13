@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 import dace
+import numpy as np
 import sympy
 from dace import data, nodes, subsets, symbolic
 from dace.libraries.blas.nodes.einsum import Einsum
@@ -1249,7 +1250,12 @@ def apply_requests(sdfg: dace.SDFG, requests: Requests) -> dict[str, str]:
     def arrays() -> dict[str, data.Array]:
         return {n: d for n, d in sdfg.arrays.items() if isinstance(d, data.Array) and not isinstance(d, data.View)}
 
-    state = requests.run([ArraySpec(name, len(desc.shape)) for name, desc in arrays().items()])
+    state = requests.run(
+        [
+            ArraySpec(name, len(desc.shape), element=np.dtype(desc.dtype.as_numpy_dtype()).name)
+            for name, desc in arrays().items()
+        ]
+    )
     working: dict[str, str] = {}
     stacked: dict[str, int] = {}  # a zipped array's field dimension, which its unzip splits along by default
     for op in requests.operations:
