@@ -148,10 +148,15 @@ def test_a_zip_of_one_precision_is_a_field_dimension() -> None:
     assert mixed.arrays["q"].members == (("x", Precision.FP32), ("y", None))
     with pytest.raises(ValueError, match="splits into 3 array"):
         run([Zip(("x", "y", "z"), "p"), Unzip("p", ("u", "v"))], xyz, (), "operations")
+    first = run([Zip(("x", "y", "z"), "p", dim=Dim(0))], xyz, (), "operations").arrays["p"]
+    assert first.field_dim == 0 and first.digits.digits[0].extent == 3
+    with pytest.raises(ValueError, match="struct, which has no dim"):
+        run([Cast("x", Precision.FP32), Zip(("x", "y"), "q", dim=Dim(0))], xyz, (), "operations")
 
 
 def test_unzip_along_a_dimension_splits_an_array() -> None:
-    """SplitArray: one array per index of a small dimension (the extent is the frontend's to check)."""
+    """One array per index of a small dimension, the inverse of a zip along it (the extent of a dimension
+    no zip made is the frontend's to check)."""
     state = run([Unzip("q", ("q_rain", "q_ice"), dim=Dim(1))], [ArraySpec("q", 2)], (), "operations")
     assert {name: array.digits.ndim for name, array in state.arrays.items()} == {"q_rain": 1, "q_ice": 1}
     with pytest.raises(ValueError, match="no dimension 2"):

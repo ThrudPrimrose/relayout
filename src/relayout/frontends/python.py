@@ -25,7 +25,7 @@ from dataclasses import dataclass
 
 from relayout.layout import IndexMap
 
-__all__ = ["MPI_BUFFERS", "LayoutError", "Regroup", "Split", "Zipped", "rewrite"]
+__all__ = ["MPI_BUFFERS", "LayoutError", "Regroup", "Unzipped", "Zipped", "rewrite"]
 
 
 class LayoutError(ValueError):
@@ -176,15 +176,22 @@ class Rewriter(ast.NodeTransformer):
 
 @dataclass(frozen=True, slots=True)
 class Zipped:
-    """An array zipped into ``into`` at ``index`` of its last (field) dimension."""
+    """An array zipped into ``into`` at ``index`` of its field dimension ``dim`` (None: last)."""
 
     into: str
     index: int
+    dim: int | None = None
+
+    def view(self) -> str:
+        """The field as a view of the zipped array."""
+        if self.dim is None:
+            return f"{self.into}[..., {self.index}]"
+        return f"{self.into}[{', '.join([':'] * self.dim + [str(self.index)])}]"
 
 
 @dataclass(frozen=True, slots=True)
-class Split:
-    """An array split along ``dim`` into ``parts``, one array per index."""
+class Unzipped:
+    """An array unzipped along ``dim`` into ``parts``, one array per index."""
 
     parts: tuple[str, ...]
     dim: int
@@ -192,12 +199,12 @@ class Split:
 
 class Regroup(ast.NodeTransformer):
     """``zip`` / ``unzip`` on the program: a zipped array's accesses address its field of the zipped
-    array (``A[i, j]`` -> ``Z[i, j, k]``, a whole use the view ``Z[..., k]``), a split array's address the
-    part their constant index names (``W[i, c]`` -> ``W_c[i]``), and the function takes the new arrays."""
+    array (``A[i, j]`` -> ``Z[i, j, k]``, a whole use the view ``Z[..., k]``), an unzipped array's address
+    the part their constant index names (``W[i, c]`` -> ``W_c[i]``), and the function takes the new arrays."""
 
-    def __init__(self, zipped: Mapping[str, Zipped], split: Mapping[str, Split]) -> None:
+    def __init__(self, zipped: Mapping[str, Zipped], unzipped: Mapping[str, Unzipped]) -> None:
         self.zipped = zipped
-        self.split = split
+        self.unzipped = unzipped
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
         params: list[ast.arg] = []
@@ -206,8 +213,8 @@ class Regroup(ast.NodeTransformer):
                 into = self.zipped[arg.arg].into
                 if all(p.arg != into for p in params):
                     params.append(ast.arg(into))
-            elif arg.arg in self.split:
-                params += [ast.arg(part) for part in self.split[arg.arg].parts]
+            elif arg.arg in self.unzipped:
+                params += [ast.arg(part) for part in self.unzipped[arg.arg].parts]
             else:
                 params.append(arg)
         node.args.args = params
@@ -219,33 +226,35 @@ class Regroup(ast.NodeTransformer):
         elements = [self.visit(e) for e in elements]
         if name in self.zipped:
             field = self.zipped[name]
-            index = ast.Tuple([*elements, ast.Constant(field.index)], ast.Load())
+            elements.insert(len(elements) if field.dim is None else field.dim, ast.Constant(field.index))
+            index = ast.Tuple(elements, ast.Load())
             return ast.Subscript(ast.Name(field.into, ast.Load()), index, node.ctx)
-        if name in self.split:
-            split = self.split[name]
-            constant = elements.pop(split.dim) if split.dim < len(elements) else None
-            if not (isinstance(constant, ast.Constant) and isinstance(constant.value, int)):
-                raise LayoutError(
-                    f"{where(node)}: {name!r} is split along dimension {split.dim}; index it by a constant"
-                )
-            part = split.parts[constant.value]
-            return ast.Subscript(
-                ast.Name(part, ast.Load()), ast.Tuple(elements or [ast.Constant(0)], ast.Load()), node.ctx
-            )
+        if name in self.unzipped:
+            unzipped = self.unzipped[name]
+            if unzipped.dim >= len(elements) or isinstance(elements[unzipped.dim], ast.Slice):
+                raise LayoutError(f"{where(node)}: {name!r} is unzipped along dimension {unzipped.dim}; index it there")
+            index = elements.pop(unzipped.dim)
+            rest = ast.Tuple(elements or [ast.Constant(0)], ast.Load())
+            if isinstance(index, ast.Constant) and isinstance(index.value, int):
+                return ast.Subscript(ast.Name(unzipped.parts[index.value], ast.Load()), rest, node.ctx)
+            # a data-dependent index picks its part at run time: ``(W_0, W_1)[c][i]``, read or written
+            parts = ast.Tuple([ast.Name(part, ast.Load()) for part in unzipped.parts], ast.Load())
+            return ast.Subscript(ast.Subscript(parts, index, ast.Load()), rest, node.ctx)
         return self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
         if isinstance(node.value, ast.Name) and node.value.id in self.zipped and node.attr == "shape":
-            return parse(f"{self.zipped[node.value.id].into}.shape[:-1]")
+            field = self.zipped[node.value.id]
+            dim = -1 if field.dim is None else field.dim
+            return parse(f"{field.into}.shape[:{dim}] + {field.into}.shape[{dim}:][1:]")
         return self.generic_visit(node)
 
     def visit_Name(self, node: ast.Name) -> ast.AST:
         if node.id in self.zipped and isinstance(node.ctx, ast.Load):
-            field = self.zipped[node.id]
-            return parse(f"{field.into}[..., {field.index}]")
-        if node.id in self.split:
+            return parse(self.zipped[node.id].view())
+        if node.id in self.unzipped:
             raise LayoutError(
-                f"{where(node)}: {node.id!r} is split into {list(self.split[node.id].parts)}; use it by element"
+                f"{where(node)}: {node.id!r} is unzipped into {list(self.unzipped[node.id].parts)}; use it by element"
             )
         return node
 
@@ -261,13 +270,13 @@ def rewrite(
     tree: ast.Module,
     layouts: Mapping[str, IndexMap],
     zipped: Mapping[str, Zipped] | None = None,
-    split: Mapping[str, Split] | None = None,
+    unzipped: Mapping[str, Unzipped] | None = None,
 ) -> ast.Module:
     """``tree`` running on the laid-out buffers of ``layouts`` (see the module docstring), after the
-    arrays of ``zipped`` / ``split`` are regrouped (:class:`Regroup`; a layout then names the new
+    arrays of ``zipped`` / ``unzipped`` are regrouped (:class:`Regroup`; a layout then names the new
     arrays); the input tree is rewritten in place and returned, locations fixed."""
-    if zipped or split:
-        tree = Regroup(zipped or {}, split or {}).visit(tree)
+    if zipped or unzipped:
+        tree = Regroup(zipped or {}, unzipped or {}).visit(tree)
     rewriter = Rewriter(layouts)
     tree.body = rewriter.statements(tree.body)
     if rewriter.uses_numpy and not imports_numpy(tree):

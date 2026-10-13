@@ -1,14 +1,13 @@
 # Copyright 2026 ETH Zurich and the relayout authors.
-"""Zip on SDFGs (ported from dace@extended's ZipArrays tests): arrays of one element type become a field
-dimension of one array, which a layout then places (AoS as zipped, SoA permuted), and reductions into a
-zipped field keep accumulating."""
+"""Zip and unzip on SDFGs, each the other's inverse: arrays of one element type are stacked along a new
+dimension of one array (last: AoS, first: SoA, or a layout places it), reductions into a zipped field keep
+accumulating, and an array of a small constant extent unzips into one array per index."""
 
 import numpy as np
-import pytest
 
 import dace
 from conftest import variant
-from relayout.frontends.sdfg import LayoutError, apply_requests, relayout_array, unzip_array, zip_arrays
+from relayout.frontends.sdfg import apply_requests, relayout_array, unzip_array, zip_arrays
 from relayout.ops import ArraySpec, Permute, run
 from relayout.requests import parse_requests
 
@@ -31,11 +30,12 @@ def dual_reduce(x: dace.float64[N], acc0: dace.float64[N], acc1: dace.float64[N]
 
 def test_zipped_fields_are_one_array_in_either_order() -> None:
     a, b = np.random.default_rng(0).random((2, 6, 6))
-    for order in ("aos", "soa"):
+    for order in ("aos", "soa", "stacked_first"):
         sdfg = madd.to_sdfg(simplify=True)
         variant(sdfg, order)
-        zip_arrays(sdfg, ["A", "B"], "Z")
-        assert [str(s) for s in sdfg.arrays["Z"].shape] == ["N", "N", "2"]
+        zip_arrays(sdfg, ["A", "B"], "Z", 0 if order == "stacked_first" else None)
+        expected = ["2", "N", "N"] if order == "stacked_first" else ["N", "N", "2"]
+        assert [str(s) for s in sdfg.arrays["Z"].shape] == expected
         if order == "soa":
             soa = run([Permute("A", ("i2", "i0", "i1"))], [ArraySpec("A", 3)], (), "ops").layout("A", ["N", "N", "2"])
             relayout_array(sdfg, "Z", soa)
@@ -83,7 +83,7 @@ def species_pick(q: dace.float64[NCLV, N], out: dace.float64[N]):
 
 
 def test_unzip_splits_an_array_along_a_small_dimension() -> None:
-    """SplitArray: one array per species, also when a loop walks the species (it is unrolled)."""
+    """One array per species, also when a loop walks the species (it is unrolled)."""
     q = np.random.default_rng(2).random((NCLV, 5))
     for program in (species_sum, species_loop):
         sdfg = program.to_sdfg(simplify=True)
@@ -115,10 +115,54 @@ def test_a_request_zips_then_lays_out() -> None:
     np.testing.assert_allclose(c, 0.5 * (a + b))
 
 
-def test_a_data_dependent_split_index_is_refused() -> None:
+def test_a_request_zips_along_a_dimension_and_unzips_back() -> None:
+    """zip with dim stacks the fields first; the unzip that names no dim splits along that same dimension."""
+    request = parse_requests(
+        {
+            "operations": [
+                {"action": "zip", "arrays": ["A", "B"], "into": "Z", "dim": 0},
+                {"action": "unzip", "array": "Z", "into": ["A2", "B2"]},
+            ]
+        }
+    )
+    sdfg = madd.to_sdfg(simplify=True)
+    variant(sdfg, "zip_unzip")
+    apply_requests(sdfg, request)
+    assert {"A2", "B2"} <= set(sdfg.arrays) and "Z" not in sdfg.arrays
+    a, b = np.random.default_rng(5).random((2, 4, 4))
+    c = np.zeros((4, 4))
+    sdfg(A=a.copy(), B=b.copy(), C=c, N=4)
+    np.testing.assert_allclose(c, 0.5 * (a + b))
+
+
+def test_a_data_dependent_index_selects_among_the_parts() -> None:
+    """``q[K, i]`` with K known only at run time: the tasklet reads every part and picks the one K names."""
     sdfg = species_pick.to_sdfg(simplify=True)
-    with pytest.raises(LayoutError, match="not a constant"):
-        unzip_array(sdfg, "q", ["a", "b", "c"], 0)
+    variant(sdfg, "pick")
+    unzip_array(sdfg, "q", ["a", "b", "c"], 0)
+    sdfg.validate()
+    q = np.random.default_rng(6).random((NCLV, 5))
+    for k in range(NCLV):
+        out = np.zeros(5)
+        sdfg(q=q.copy(), out=out, N=5, K=k)
+        np.testing.assert_allclose(out, q[k])
+
+
+@dace.program
+def species_put(q: dace.float64[NCLV, N], x: dace.float64[N]):
+    for i in dace.map[0:N]:
+        q[K, i] = x[i] * 2.0
+
+
+def test_a_data_dependent_write_stores_into_the_part_it_names() -> None:
+    sdfg = species_put.to_sdfg(simplify=True)
+    variant(sdfg, "put")
+    unzip_array(sdfg, "q", ["a", "b", "c"], 0)
+    sdfg.validate()
+    x = np.random.default_rng(7).random(5)
+    q = np.zeros((NCLV, 5))
+    sdfg(q=q, x=x, N=5, K=1)
+    np.testing.assert_allclose(q, np.stack([np.zeros(5), 2 * x, np.zeros(5)]))
 
 
 if __name__ == "__main__":
@@ -126,4 +170,6 @@ if __name__ == "__main__":
     test_a_reduction_into_zipped_fields_keeps_accumulating()
     test_unzip_splits_an_array_along_a_small_dimension()
     test_a_request_zips_then_lays_out()
-    test_a_data_dependent_split_index_is_refused()
+    test_a_request_zips_along_a_dimension_and_unzips_back()
+    test_a_data_dependent_index_selects_among_the_parts()
+    test_a_data_dependent_write_stores_into_the_part_it_names()

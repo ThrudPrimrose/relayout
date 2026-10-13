@@ -781,22 +781,23 @@ def relayout_array(sdfg: dace.SDFG, name: str, layout: IndexMap) -> str:
     return laid
 
 
-def zip_arrays(sdfg: dace.SDFG, fields: Sequence[str], into: str) -> str:
-    """Fuse ``sdfg``'s arrays ``fields`` (one shape, one element type) into the new transient ``into`` with
-    a last dimension of the fields: ``into[..., k]`` is ``fields[k]``. Arguments keep their descriptors
-    and are converted in and out (:func:`move_array`)."""
+def zip_arrays(sdfg: dace.SDFG, fields: Sequence[str], into: str, dim: int | None = None) -> str:
+    """Fuse ``sdfg``'s arrays ``fields`` (one shape, one element type) into the new transient ``into``,
+    stacked along a new dimension at ``dim`` (None: last; ``into[..., k]`` is ``fields[k]``), the inverse of
+    :func:`unzip_array`. Arguments keep their descriptors and are converted in and out (:func:`move_array`)."""
     descs = [array_desc(sdfg, field) for field in fields]
     shapes = {tuple(str(extent) for extent in desc.shape) for desc in descs}
     types = {desc.dtype for desc in descs}
     if len(shapes) != 1 or len(types) != 1:
         raise LayoutError(f"zip of {list(fields)}: the arrays must share one shape and one element type")
-    shape = [*descs[0].shape, len(fields)]
+    shape = list(descs[0].shape)
+    shape.insert(len(shape) if dim is None else dim, len(fields))
     zipped = copy.deepcopy(descs[0])
     zipped.transient = True
     zipped.set_shape(shape, strides=packed_strides(shape), total_size=product(shape))
     sdfg.add_datadesc(into, zipped, find_new_name=False)
     for k, field in enumerate(fields):
-        move_array(sdfg, field, into, Field(k))
+        move_array(sdfg, field, into, Field(k, dim))
     propagation.propagate_memlets_sdfg(sdfg)
     return into
 
@@ -810,16 +811,16 @@ def constant(value: object) -> int | None:
 
 
 def split_indices(sdfg: dace.SDFG, name: str, dim: int) -> list[object]:
-    """The index each point access of ``name`` (a memlet inside every scope; the scopes' propagated ranges
-    follow from them) takes on dimension ``dim``, unless it is a constant."""
+    """The ranges point accesses of ``name`` (a memlet inside every scope; the scopes' propagated ranges
+    follow from them) take on dimension ``dim``: a range spans several parts, which no access can."""
     found = []
     for state in sdfg.states():
         for edge in state.edges():
             leaf = not isinstance(edge.dst, nodes.EntryNode) and not isinstance(edge.src, nodes.ExitNode)
             if edge.data.data == name and not edge.data.is_empty() and leaf:
                 begin, end, _ = as_range(edge.data.subset).ranges[dim]
-                if not symbolic.equal_valued(begin, end) or constant(begin) is None:
-                    found.append(begin if symbolic.equal_valued(begin, end) else (begin, end))
+                if not symbolic.equal_valued(begin, end):
+                    found.append((begin, end))
     return found
 
 
@@ -854,8 +855,9 @@ def unroll_over(sdfg: dace.SDFG, extent: int) -> None:
 def unzip_array(sdfg: dace.SDFG, name: str, into: Sequence[str], dim: int) -> list[str]:
     """Split ``sdfg``'s array ``name`` along dimension ``dim`` (constant extent ``len(into)``) into one array
     per index, ``into[c]`` holding ``name[..., c, ...]``: the maps and loops over the dimension are
-    unrolled so every index on it is a constant. An argument keeps its descriptor, converted into the
-    parts and back. A data-dependent index (or a nested SDFG receiving the array) is refused."""
+    unrolled so every index on it is a constant, and a Python tasklet indexing it by a data-dependent value
+    selects among the parts (:func:`select_part`). An argument keeps its descriptor, converted into the
+    parts and back. A range along the dimension (or a nested SDFG receiving the array) is refused."""
     desc = array_desc(sdfg, name)
     if constant(desc.shape[dim]) != len(into):
         raise LayoutError(
@@ -864,9 +866,9 @@ def unzip_array(sdfg: dace.SDFG, name: str, into: Sequence[str], dim: int) -> li
     if any(True for _ in nested_uses(sdfg, name)):
         raise LayoutError(f"{name!r} flows into a nested SDFG; inline it before splitting the array")
     unroll_over(sdfg, len(into))
-    dynamic = split_indices(sdfg, name, dim)
-    if dynamic:
-        raise LayoutError(f"{name!r} is indexed on dimension {dim} by {dynamic[0]}, not a constant; branch on it first")
+    ranged = split_indices(sdfg, name, dim)
+    if ranged:
+        raise LayoutError(f"{name!r} is indexed on dimension {dim} by the range {ranged[0]}; split a point access")
     rest = [extent for k, extent in enumerate(desc.shape) if k != dim] or [1]
     for part in into:
         piece = copy.deepcopy(desc)
@@ -874,14 +876,10 @@ def unzip_array(sdfg: dace.SDFG, name: str, into: Sequence[str], dim: int) -> li
         piece.set_shape(rest, strides=packed_strides(rest), total_size=product(rest))
         sdfg.add_datadesc(part, piece, find_new_name=False)
 
-    def part_of(subset: subsets.Subset | None) -> tuple[str, subsets.Range]:
-        ranges = list(as_range(subset).ranges)
-        index = constant(ranges.pop(dim)[0])
-        return into[index or 0], subsets.Range(ranges or [(0, 0, 1)])
-
     for state in sdfg.states():
+        copy_through_tasklets(state, name, dim)
         for node in [n for n in state.data_nodes() if n.data == name]:
-            split_access(state, node, part_of)
+            split_access(state, node, into, dim)
     for edge in sdfg.all_interstate_edges():
         assignments = edge.data.assignments
         edge.data.assignments = {k: split_subscripts(v, name, into, dim) for k, v in assignments.items()}
@@ -903,36 +901,130 @@ def unzip_array(sdfg: dace.SDFG, name: str, into: Sequence[str], dim: int) -> li
     return list(into)
 
 
-def split_access(
-    state: SDFGState, node: nodes.AccessNode, part_of: Callable[[subsets.Subset | None], tuple[str, subsets.Range]]
-) -> None:
+def split_access(state: SDFGState, node: nodes.AccessNode, into: Sequence[str], dim: int) -> None:
     """Each memlet path through access node ``node`` rebuilt from a new access node of the part its leaf
-    (the point access inside the scopes) names, through the same scopes; ``node`` is then removed."""
-    parts: dict[str, nodes.AccessNode] = {}
+    (the point access inside the scopes) names on ``dim``, through the same scopes; a leaf whose index there
+    is data-dependent goes to every part (:func:`select_part`). ``node`` is then removed."""
+    accesses: dict[str, nodes.AccessNode] = {}
+
+    def rebuild(leaf: MultiConnectorEdge[dace.Memlet], part: str, memlet: dace.Memlet, conn: str | None) -> None:
+        """The path of ``leaf`` from (or to) a new access node of ``part`` carrying ``memlet``, at connector
+        ``conn`` of its code node (None: the connector it had)."""
+        path = state.memlet_path(leaf)
+        access = accesses.setdefault(part, state.add_access(part))
+        if path[0].src is node:
+            scopes = [e.dst for e in path[:-1]]
+            state.add_memlet_path(access, *scopes, leaf.dst, dst_conn=conn or leaf.dst_conn, memlet=memlet)
+        else:
+            scopes = [e.src for e in path[1:]]
+            state.add_memlet_path(leaf.src, *scopes, access, src_conn=conn or leaf.src_conn, memlet=memlet)
+
     for edge in list(state.out_edges(node)) + list(state.in_edges(node)):
         if edge not in state.edges():
             continue
-        outgoing = edge.src is node
         tree = state.memlet_tree(edge)
         for leaf in list(tree.leaves()):
-            if leaf.data.data != node.data:
-                part, _ = part_of(leaf.data.other_subset)
-                leaf.data.other_subset = part_of(leaf.data.other_subset)[1]
+            named = leaf.data.data == node.data
+            ranges = list(as_range(leaf.data.subset if named else leaf.data.other_subset).ranges)
+            index = ranges.pop(dim)[0]
+            rest = subsets.Range(ranges or [(0, 0, 1)])
+            position = constant(index)
+            if position is None:
+                select_part(leaf, into, rest, index, rebuild)
+                continue
+            if named:
+                memlet = dace.Memlet(data=into[position], subset=rest, wcr=leaf.data.wcr, dynamic=leaf.data.dynamic)
+            else:
+                leaf.data.other_subset = rest
                 memlet = leaf.data
-            else:
-                part, subset = part_of(leaf.data.subset)
-                memlet = dace.Memlet(data=part, subset=subset, wcr=leaf.data.wcr, dynamic=leaf.data.dynamic)
-            path = state.memlet_path(leaf)
-            access = parts.setdefault(part, state.add_access(part))
-            if outgoing:
-                scopes = [e.dst for e in path[:-1]]
-                state.add_memlet_path(access, *scopes, leaf.dst, dst_conn=leaf.dst_conn, memlet=memlet)
-            else:
-                scopes = [e.src for e in path[1:]]
-                state.add_memlet_path(leaf.src, *scopes, access, src_conn=leaf.src_conn, memlet=memlet)
+            rebuild(leaf, into[position], memlet, None)
         for old in list(tree):
-            state.remove_edge_and_connectors(old)
+            remove_path_edge(state, old)
     state.remove_node(node)
+
+
+def copy_through_tasklets(state: SDFGState, name: str, dim: int) -> None:
+    """Each copy between ``name`` and another container whose index on ``dim`` is data-dependent goes through
+    a tasklet ``__out = __inp``, which :func:`select_part` can then rewrite."""
+    for edge in list(state.edges()):
+        memlet = edge.data
+        if memlet.data != name or not isinstance(edge.src, nodes.AccessNode | nodes.EntryNode):
+            continue
+        if not isinstance(edge.dst, nodes.AccessNode | nodes.ExitNode):
+            continue
+        reads = isinstance(edge.dst, nodes.AccessNode) and edge.dst.data != name
+        other = edge.dst if reads else edge.src
+        if not isinstance(other, nodes.AccessNode) or constant(as_range(memlet.subset).ranges[dim][0]) is not None:
+            continue
+        tasklet = state.add_tasklet(f"unzip_copy_{name}", {"__inp"}, {"__out"}, "__out = __inp")
+        own = dace.Memlet(data=name, subset=copy.deepcopy(memlet.subset), wcr=memlet.wcr)
+        theirs = (
+            subsets.Range.from_array(state.sdfg.arrays[other.data])
+            if memlet.other_subset is None
+            else memlet.other_subset
+        )
+        state.remove_edge(edge)
+        if reads:
+            state.add_edge(edge.src, edge.src_conn, tasklet, "__inp", own)
+            state.add_edge(
+                tasklet, "__out", edge.dst, edge.dst_conn, dace.Memlet(data=other.data, subset=copy.deepcopy(theirs))
+            )
+        else:
+            state.add_edge(
+                edge.src, edge.src_conn, tasklet, "__inp", dace.Memlet(data=other.data, subset=copy.deepcopy(theirs))
+            )
+            state.add_edge(tasklet, "__out", edge.dst, edge.dst_conn, own)
+
+
+def select_part(
+    leaf: MultiConnectorEdge[dace.Memlet],
+    into: Sequence[str],
+    rest: subsets.Range,
+    index: object,
+    rebuild: Callable[[MultiConnectorEdge[dace.Memlet], str, dace.Memlet, str | None], None],
+) -> None:
+    """A point access of a Python tasklet through the data-dependent ``index``: a read takes every part on a
+    connector of its own and picks the one ``index`` names, a write stores into that one through dynamic
+    memlets to every part."""
+    reads = isinstance(leaf.dst, nodes.Tasklet)
+    tasklet = leaf.dst if reads else leaf.src
+    conn = leaf.dst_conn if reads else leaf.src_conn
+    if not isinstance(tasklet, nodes.Tasklet) or tasklet.language is not dace.Language.Python or conn is None:
+        raise LayoutError(f"{leaf.data} is indexed by {index}, not a constant, outside a Python tasklet")
+    which = symbolic.symstr(index)
+    parts = [f"{conn}__{k}" for k in range(len(into))]
+    code = tasklet.code.as_string
+    if reads:
+        tasklet.remove_in_connector(conn)
+        choice = " else ".join(f"{p} if ({which}) == {k}" for k, p in enumerate(parts[:-1])) + f" else {parts[-1]}"
+        tasklet.code = CodeBlock(f"{conn} = {choice}\n{code}")
+    else:
+        tasklet.remove_out_connector(conn)
+        stores = "\n".join(
+            f"{'if' if k == 0 else 'elif'} ({which}) == {k}:\n    {p} = {conn}" for k, p in enumerate(parts)
+        )
+        tasklet.code = CodeBlock(f"{code}\n{stores}")
+    for k, part in enumerate(into):
+        if reads:
+            tasklet.add_in_connector(parts[k])
+        else:
+            tasklet.add_out_connector(parts[k])
+        memlet = dace.Memlet(
+            data=part, subset=copy.deepcopy(rest), wcr=leaf.data.wcr, dynamic=not reads or leaf.data.dynamic
+        )
+        rebuild(leaf, part, memlet, parts[k])
+
+
+def remove_path_edge(state: SDFGState, edge: MultiConnectorEdge[dace.Memlet]) -> None:
+    """Remove ``edge`` of a replaced memlet path, and the scope connectors it leaves unused; a code node's
+    connector stays, for the new path that now uses it."""
+    state.remove_edge(edge)
+    if isinstance(edge.src, nodes.EntryNode | nodes.ExitNode) and edge.src_conn is not None:
+        if not any(e.src_conn == edge.src_conn for e in state.out_edges(edge.src)):
+            edge.src.remove_out_connector(edge.src_conn)
+    if isinstance(edge.dst, nodes.EntryNode | nodes.ExitNode) and edge.dst_conn is not None:
+        if not any(e.dst_conn == edge.dst_conn for e in state.in_edges(edge.dst)):
+            edge.dst.remove_in_connector(edge.dst_conn)
 
 
 def is_read_in_parts(sdfg: dace.SDFG, parts: Sequence[str]) -> bool:
@@ -973,11 +1065,14 @@ def apply_requests(sdfg: dace.SDFG, requests: Requests) -> dict[str, str]:
         return {n: d for n, d in sdfg.arrays.items() if isinstance(d, data.Array) and not isinstance(d, data.View)}
 
     state = requests.run([ArraySpec(name, len(desc.shape)) for name, desc in arrays().items()])
+    stacked: dict[str, int] = {}  # a zipped array's field dimension, which its unzip splits along by default
     for op in requests.operations:
         if isinstance(op, Zip):
-            zip_arrays(sdfg, op.arrays, op.into)
+            zip_arrays(sdfg, op.arrays, op.into, op.dim)
+            stacked[op.into] = len(sdfg.arrays[op.into].shape) - 1 if op.dim is None else op.dim
         elif isinstance(op, Unzip):
-            dim = len(sdfg.arrays[op.array].shape) - 1 if op.dim is None else op.dim
+            last = len(sdfg.arrays[op.array].shape) - 1
+            dim = stacked.get(op.array, last) if op.dim is None else op.dim
             unzip_array(sdfg, op.array, op.into, dim)
     laid_out = {op.array for op in requests.operations if isinstance(op, DigitOperation)}
     current = arrays()

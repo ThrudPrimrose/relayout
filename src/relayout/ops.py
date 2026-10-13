@@ -578,6 +578,7 @@ class ArrayState:
 
     __slots__ = (
         "digits",
+        "field_dim",
         "fields",
         "format",
         "location",
@@ -600,8 +601,9 @@ class ArrayState:
         self.name = spec.name
         self.sparse = spec.sparse
         self.digits = DigitTuple(spec.ndim, grid, where, spec.extents)
-        #: The arrays a zip of one precision fused along the last dimension, in order.
+        #: The arrays a zip of one precision stacked along dimension ``field_dim``, in order.
         self.fields: tuple[str, ...] = ()
+        self.field_dim = 0
         #: A struct's fields with their precisions (None = the problem precision).
         self.members = members or tuple((member, None) for member in spec.members)
         self.native = spec.native
@@ -748,15 +750,17 @@ class Format(Operation):
 @operation
 @dataclass(frozen=True, slots=True)
 class Zip(Operation):
-    """Fuse whole arrays ``arrays`` of one shape into one array ``into``. Arrays of one precision become a
-    new last dimension, the field (``into[..., k]`` is ``arrays[k]``), which the digit operations then
-    place like any other (field-outer is SoA, field-inner AoS, blocked between AoSoA); arrays of different
-    precisions become one array of structs, one member per array in order, each keeping its precision."""
+    """Fuse whole arrays ``arrays`` of one shape into one array ``into``, the inverse of :class:`Unzip`.
+    Arrays of one precision are stacked along a new dimension, the field, at position ``dim`` (None: last;
+    ``into[..., k]`` is ``arrays[k]``), which the digit operations then place like any other (field-outer is
+    SoA, field-inner AoS, blocked between AoSoA); arrays of different precisions become one array of
+    structs, one member per array in order, each keeping its precision (and take no ``dim``)."""
 
     action: ClassVar[Action] = Action.ZIP
     lowers: ClassVar[bool] = False
     arrays: ArrayNames
     into: ArrayName
+    dim: Dim | None = None
 
     def apply(self, state: State) -> None:
         fields = [state.untouched(name, self) for name in self.arrays]
@@ -772,10 +776,18 @@ class Zip(Operation):
         for name in self.arrays:
             del state.arrays[name]
         ndim, precisions = ndims.pop(), {field.precision for field in fields}
+        position = ndim if self.dim is None else self.dim
+        if position > ndim:
+            raise ValueError(
+                f"{state.where}: {ndim}-dimensional arrays stack along dimension 0 to {ndim}, not {position}"
+            )
+        if len(precisions) != 1 and self.dim is not None:
+            raise ValueError(f"{state.where}: arrays of different precisions zip into a struct, which has no dim")
         if len(precisions) == 1:
-            spec = ArraySpec(self.into, ndim + 1, extents=(None,) * ndim + (len(fields),))
-            zipped = ArrayState(spec, state.grid, state.where)
-            zipped.fields, zipped.precision = tuple(self.arrays), precisions.pop()
+            extents = [None] * ndim
+            extents.insert(position, len(fields))
+            zipped = ArrayState(ArraySpec(self.into, ndim + 1, extents=tuple(extents)), state.grid, state.where)
+            zipped.fields, zipped.field_dim, zipped.precision = tuple(self.arrays), position, precisions.pop()
         else:
             members = tuple((field.name, field.precision) for field in fields)
             zipped = ArrayState(ArraySpec(self.into, ndim), state.grid, state.where, members)
@@ -786,10 +798,11 @@ class Zip(Operation):
 @operation
 @dataclass(frozen=True, slots=True)
 class Unzip(Operation):
-    """Split the whole array ``array`` into the arrays ``into``: a struct into one array per member (a
-    complex array is the struct ``(re, im)``), a zipped array along its field, or, with ``dim``, any
-    array along dimension ``dim``, one array per index (its extent must be ``len(into)``). Each keeps
-    the precision and placement it had."""
+    """Split the whole array ``array`` into the arrays ``into``, the inverse of :class:`Zip`: a struct into
+    one array per member (a complex array is the struct ``(re, im)``), a zipped array along its field, or,
+    with ``dim``, any array along dimension ``dim``, one array per index (its extent must be
+    ``len(into)``: ``A[N, M, 4]`` into four ``[N, M]`` arrays). Each keeps the precision and placement it
+    had."""
 
     action: ClassVar[Action] = Action.UNZIP
     lowers: ClassVar[bool] = False

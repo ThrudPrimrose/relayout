@@ -55,8 +55,8 @@ operation that cannot apply is a `ValueError` naming its entry (`operations[5] (
 | --- | --- | --- |
 | `cast` | `array`, `to` | the element type (`fp64` `fp32` `fp16` `bf16` `fp8_e4m3` `fp8_e5m2`) |
 | `format` | `array`, `to` | a sparse array's storage format (the caller checks the label) |
-| `zip` | `arrays`, `into` | fuses whole arrays of one shape into one array of structs, one member per array, each keeping its precision; the arrays must be placed alike |
-| `unzip` | `array`, `into` | splits a whole struct array into one array per member, each keeping its member's precision and placement. A complex array is the native struct `(re, im)`: one element type to every other operation (a cast sets both parts), and still unzippable |
+| `zip` | `arrays`, `into`, `dim` | fuses whole arrays of one shape into one array, the inverse of `unzip`: arrays of one precision are stacked along a new dimension at `dim` (default last: `into[..., k]` is `arrays[k]`), which the digit operations place like any other (field-outer SoA, field-inner AoS, blocked between AoSoA); arrays of different precisions become one array of structs, one member per array, each keeping its precision (no `dim`). The arrays must be placed alike |
+| `unzip` | `array`, `into`, `dim` | splits a whole array into one array per part, the inverse of `zip`: a struct into its members, a zipped array along its stacked dimension, or with `dim` any array along dimension `dim` of constant extent `len(into)` (`A[N, M, 4]` into four `[N, M]` arrays). Each part keeps its precision and placement. An index along `dim` the program only knows at run time selects among the parts. A complex array is the native struct `(re, im)`: one element type to every other operation (a cast sets both parts), and still unzippable |
 | `block` | `array`, `digit`, `factor`, `into` | cuts `(d, s, e)` into coarse `(d, s·b, ⌈e/b⌉)` and fine `(d, s, b)`, in place |
 | `unblock` | `array`, `digits`, `factor`, `into` | merges a block's two digits |
 | `split` | `array`, `digit`, `parts`, `into` | cuts a whole dimension's digit into `parts` contiguous balanced bands: the band index and the index within the band |
@@ -146,4 +146,5 @@ convert(src[L⁻¹(p)])`, writes contiguous, dead cells zero.
 - **One algebra:** the digit tuple onto dace's symbolic `LayoutMap`
   (`dace/libraries/layout/algebra.py`), with each array's symbolic shape (`ArraySpec` extents), so `pad`
   and dead cells are exact.
-- **AoSoA:** fields interleaved per block (`u0..u63, v0..v63, u64..`), as an option of `zip`.
+- **AoSoA:** fields interleaved per block (`u0..u63, v0..v63, u64..`): `zip`, then `block` a dimension and
+  `permute` the field between the block index and its offset.
