@@ -1,0 +1,28 @@
+# relayout CI: pre-commit, the test suite, and the MPI tests on two ranks.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.14"
+      # DaCe builds through CMake + Ninja; the MPI tests need an MPI library for mpi4py.
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build libopenmpi-dev openmpi-bin
+      - run: uv sync --locked --extra mpi --extra fparena
+      - run: uv run --no-sync pre-commit run --all-files
+      - run: uv run --no-sync pytest -q -rfEs tests
+        env:
+          OMP_NUM_THREADS: "1"
+      - run: mpirun -n 2 --oversubscribe uv run --no-sync pytest -q -rfEs tests/test_frontend_sdfg_mpi.py tests/test_omen_sse_mpi.py
+        env:
+          OMP_NUM_THREADS: "1"
