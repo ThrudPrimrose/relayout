@@ -22,6 +22,8 @@ mpi = ["mpi4py"]
 # The Fortran kernels: dace-fortran builds its nanobind bridge on first use but lists nanobind only in its
 # testing group.
 fortran = ["dace-fortran", "nanobind"]
+# SDFG casts (apply_requests): FP-Arena's floating-point type transformation.
+fparena = ["fp-arena"]
 
 [dependency-groups]
 dev = ["pytest", "pytest-timeout", "ruff", "pre-commit", "ml-dtypes"]
@@ -30,6 +32,8 @@ dev = ["pytest", "pytest-timeout", "ruff", "pre-commit", "ml-dtypes"]
 # dace comes from the override below, not from a source: uv applies a git dependency's sources, so a dace source here
 # would conflict with the dace commit a project that depends on relayout (hpcagent-bench) pins.
 dace-fortran = { git = "https://github.com/spcl/dace-fortran.git", branch = "main" }
+# spcl/FP-Arena#10 (follows dace@extended's nodes.copy package and states()) until it merges.
+fp-arena = { git = "https://github.com/spcl/FP-Arena.git", rev = "a7ec5ed67d62aa6f954db991ce2aebfa9d04cdbd" }
 
 [tool.uv]
 # relayout as the root project: dace@extended, also over the dace@FaCe dace-fortran pins.

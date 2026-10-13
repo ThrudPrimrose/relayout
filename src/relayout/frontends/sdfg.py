@@ -46,7 +46,7 @@ from dace.transformation.passes.insert_explicit_copies import InsertExplicitCopi
 from dace.transformation.passes.remove_views import RemoveViews
 
 from relayout.layout import IndexMap
-from relayout.ops import ArraySpec, Cast, DigitOperation, Requests, Unzip, Zip
+from relayout.ops import ArraySpec, DigitOperation, Precision, Requests, Unzip, Zip
 from relayout.rules import einsum_operand, flips_transpose, transpose_axes
 
 __all__ = [
@@ -1051,15 +1051,37 @@ def split_subscripts(text: str, name: str, into: Sequence[str], dim: int) -> str
     return ast.unparse(Replace().visit(ast.parse(text, mode="eval")))
 
 
+#: The element type a ``cast`` asks for, as dace has it.
+PRECISION_TYPES = {
+    Precision.FP64: dace.float64,
+    Precision.FP32: dace.float32,
+    Precision.FP16: dace.float16,
+}
+
+
+def cast_array(sdfg: dace.SDFG, name: str, precision: Precision) -> str:
+    """``sdfg``'s array ``name`` in the element type of ``precision``, by FP-Arena's type change (extra
+    ``fparena``): a transient in place, an argument through a transient converted in and out; returns the
+    name the program now works on."""
+    from fp_arena.transformations.change_fp_types import change_fptype  # the optional extra 'fparena'
+
+    target = PRECISION_TYPES.get(precision)
+    if target is None or name not in sdfg.arrays:
+        raise LayoutError(f"cast of {name!r} to {precision.value}: no such array, or no such element type in dace")
+    desc = array_desc(sdfg, name)
+    if desc.dtype == target:
+        return name
+    argument = not desc.transient  # change_fptype makes the descriptor it renames transient
+    change_fptype(sdfg, desc.dtype, target, cast_in_and_out_data=argument, arrays_to_replace={name})
+    return f"{name}_{target.to_string()}" if argument else name
+
+
 def apply_requests(sdfg: dace.SDFG, requests: Requests) -> dict[str, str]:
     """Carry ``requests``' operations out on ``sdfg`` (single node): ``zip`` / ``unzip`` regroup arrays in
     program order (:func:`zip_arrays`, :func:`unzip_array`), then every array a digit operation touched is
     laid out as the operations leave it (:func:`relayout_array`); returns each laid-out array's working
-    name. A precision is an element type, FP-Arena's transformation and not a layout: a ``cast`` is
-    refused here, as is a ``zip`` of different element types (a struct, not yet rewritten)."""
-    casts = [op.array for op in requests.operations if isinstance(op, Cast)]
-    if casts:
-        raise LayoutError(f"cast of {casts}: an SDFG changes element types through FP-Arena, not relayout")
+    name. A ``cast`` changes the array's element type before its layout (:func:`cast_array`, FP-Arena); a
+    ``zip`` of different element types (a struct) is not yet rewritten."""
 
     def arrays() -> dict[str, data.Array]:
         return {n: d for n, d in sdfg.arrays.items() if isinstance(d, data.Array) and not isinstance(d, data.View)}
@@ -1074,9 +1096,10 @@ def apply_requests(sdfg: dace.SDFG, requests: Requests) -> dict[str, str]:
             last = len(sdfg.arrays[op.array].shape) - 1
             dim = stacked.get(op.array, last) if op.dim is None else op.dim
             unzip_array(sdfg, op.array, op.into, dim)
+    working = {name: cast_array(sdfg, name, precision) for name, precision in sorted(requests.precisions().items())}
     laid_out = {op.array for op in requests.operations if isinstance(op, DigitOperation)}
-    current = arrays()
-    return {
-        name: relayout_array(sdfg, name, state.layout(name, [str(extent) for extent in current[name].shape]))
-        for name in sorted(laid_out)
-    }
+    for name in sorted(laid_out):
+        target = working.get(name, name)
+        shape = [str(extent) for extent in arrays()[target].shape]
+        working[name] = relayout_array(sdfg, target, state.layout(name, shape))
+    return working

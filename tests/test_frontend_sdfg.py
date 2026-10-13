@@ -144,10 +144,28 @@ def test_a_json_request_lays_out_the_program() -> None:
     b = np.zeros((3, 8))
     sdfg(A=a, B=b, N=3, M=8)
     np.testing.assert_allclose(b, reference(a))
-    with pytest.raises(LayoutError, match="FP-Arena"):
-        apply_requests(
-            stencil.to_sdfg(), parse_requests({"operations": [{"action": "cast", "array": "A", "to": "fp32"}]})
-        )
+
+
+def test_a_cast_changes_the_element_type_before_the_layout() -> None:
+    """``cast`` A to fp32 (FP-Arena, the interface stays fp64) and permute the fp32 copy."""
+    pytest.importorskip("fp_arena")
+    request = parse_requests(
+        {
+            "operations": [
+                {"action": "cast", "array": "A", "to": "fp32"},
+                {"action": "permute", "array": "A", "order": ["i1", "i0"]},
+            ]
+        }
+    )
+    sdfg = stencil.to_sdfg(simplify=True)
+    variant(sdfg, "cast")
+    working = apply_requests(sdfg, request)
+    assert working == {"A": "A_float32"} and sdfg.arrays["A_float32"].dtype == dace.float32
+    assert [str(s) for s in sdfg.arrays["A_float32"].shape] == ["M", "N"]
+    a = np.random.default_rng(6).standard_normal((3, 8))
+    b = np.zeros((3, 8))
+    sdfg(A=a, B=b, N=3, M=8)
+    np.testing.assert_allclose(b, reference(a.astype(np.float32).astype(np.float64)), rtol=1e-6)
 
 
 def test_a_library_node_without_a_rule_is_refused() -> None:
@@ -179,6 +197,7 @@ def test_an_argument_written_in_part_keeps_the_cells_the_program_leaves() -> Non
 
 
 if __name__ == "__main__":
+    test_a_cast_changes_the_element_type_before_the_layout()
     test_an_argument_written_in_part_keeps_the_cells_the_program_leaves()
     test_laid_out_arguments_and_transients_compute_the_same(
         [Permute("A", ("i1", "i0"))], [Pad("A", "i0", "2")], [Permute("A", ("i1", "i0"))]

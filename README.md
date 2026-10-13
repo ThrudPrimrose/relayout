@@ -51,7 +51,7 @@ lower(distributed.run([ArraySpec(name, 5) for name in ...], ranks=4))   # each a
 | `relayout.sparse` | sparse formats (csr, csc, coo, bsr, dia, ell) planned once from a canonical CSR; values move through the gather |
 | `relayout.rules` | how a library call absorbs a permuted operand: transpose, einsum, contraction / reduction axes, BLAS transpose flags |
 | `relayout.frontends.python` | a numpy / mpi4py program rewritten for laid-out arrays (element accesses, logical views, packed MPI buffers) |
-| `relayout.frontends.sdfg` | an SDFG rewritten for laid-out arrays: one rewrite for every layout, library nodes by their rules, MPI library nodes through packed buffers |
+| `relayout.frontends.sdfg` | an SDFG rewritten for laid-out arrays: one rewrite for every layout, library nodes by their rules, MPI library nodes through packed buffers; `zip` / `unzip` along a dimension (data-dependent indices select their part), and `cast` through FP-Arena (extra `fparena`) |
 | `relayout.frontends.schedule` | the schedule after a layout: maps tiled to the blocks their arrays are cut into, tiles over flat arrays merged back, map nests ordered by stride |
 | `relayout.search` | which layout each array takes: a program as a line of kernels, each kernel's layouts costed by the LogGP model or measured, one trajectory per array chosen globally (Viterbi DP, with greedy and enumeration as checks) and applied with conversions between segments |
 | `relayout.kernels`, `relayout.benchmarks` | the OMEN SSE kernel (Python, Fortran, MPI) and the layout witness kernels, each with a numpy oracle |
