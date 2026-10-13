@@ -10,10 +10,10 @@ is on operand ``B``: how it is physically stored while ``A`` and ``C`` stay logi
 
     row-major : addr(i, j) = i*N + j             (baseline, identity Permute)
     permuted  : B stored column-major (Permute)  (transparent dim swap of the read operand)
-    blocked   : B reshaped into [N/T, T] tiles   (Block, tile width T)
+    blocked   : B in [T, N] row panels         (Block, panel height T)
 
 The sweep exercises the Permute family (row- vs column-major storage of ``B``) and the Block family
-(``SplitDimensions`` splits one dimension of ``B`` into ``[N/T, T]``). Every candidate is transparent
+(a Block cuts the rows of ``B`` into contiguous ``[T, N]`` panels). Every candidate is transparent
 -- the permute wraps each read memlet subset, the block re-tiles the read -- so all reproduce the
 oracle; the sweep only picks the physical layout of ``B``. Structurally this is k02 (blocked
 transpose) minus the transposed write: a plain contiguous ``C`` output.
@@ -25,7 +25,9 @@ ICS'99 (blocked layout).
 
 import dace
 import numpy
-from dace.transformation.layout.brute_force import block_candidates, permutation_candidates
+
+from relayout.benchmarks import layouts_of
+from relayout.search.layouts import blockings, permutations
 
 N = dace.symbol("N")
 
@@ -46,44 +48,19 @@ def make_inputs(n, seed=0):
 
 
 def candidates():
-    """The layout candidates for the read operand ``B``: the transparent Permute family (row-major
-    vs column-major storage) plus the Block family (unblocked + ``[N/T, T]`` tiles for T in
-    {8, 16, 32}). ~9 candidates, all focused on ``B`` to match Fig.4."""
-    cands = dict(permutation_candidates("B", 2))
-    cands.update(block_candidates("B", 2, factors=(8, 16, 32)))
+    """The Permute family (row- vs column-major storage of ``B``) and the Block family (rows of ``B`` in
+    contiguous ``[T, N]`` panels for T in {8, 16, 32})."""
+    cands = layouts_of("B", permutations("B", 2))
+    cands.update(layouts_of("B", blockings("B", 2, (8, 16, 32))))
     return cands
 
 
-def pack_b(B, shape, n):
-    """Lay the logical [N, N] ``B`` out into candidate ``shape`` (the SDFG descriptor of ``B``).
-
-    ``SplitDimensions`` groups the inner tile axis LAST, so blocking a non-final dimension permutes
-    axes -- a plain C-reshape is NOT enough there (identical to k02's ``pack_a``):
-
-      * ndim 2  -> [N, N]        : unblocked / transparent Permute, storage is logical -> plain copy.
-      * [N/b,N,b]-> dim-0 block  : phys[bi, j, ti] = B[bi*b+ti, j] -> reshape [N/b,b,N] then swap
-                                    the tile axis to the end (``transpose(0, 2, 1)``).
-      * [N,N/b,b]-> dim-1 block  : phys[i, bj, tj] = B[i, bj*b+tj] -> plain reshape (tile axis is
-                                    already last).
-    """
-    if len(shape) == 2:
-        return B.copy()
-    b = shape[-1]
-    if shape[0] == n // b:  # dim 0 blocked: (N/b, N, b)
-        return B.reshape(n // b, b, n).transpose(0, 2, 1).copy()
-    return B.reshape(n, n // b, b).copy()  # dim 1 blocked: (N, N/b, b)
-
-
 def run_closure(inputs, n):
-    """``run`` lays the read operand ``B`` out into each candidate's descriptor shape (see
-    :func:`pack_b`); the Permute family keeps the descriptor [N, N] (plain copy). ``A`` stays logical
-    [N, N] and the output ``C`` is allocated fresh each call."""
+    """A ``run(sdfg) -> outputs`` closure for the sweep: binds a fresh output each call."""
 
     def run(sdfg):
-        b_shape = tuple(int(dace.symbolic.evaluate(s, {N: n})) for s in sdfg.arrays["B"].shape)
-        b_in = pack_b(inputs["B"], b_shape, n)  # laid out per descriptor, fresh (not a view)
         C = numpy.zeros((n, n))
-        sdfg(A=inputs["A"].copy(), B=b_in, C=C, N=n)
+        sdfg(A=inputs["A"].copy(), B=inputs["B"].copy(), C=C, N=n)
         return {"C": C}
 
     return run

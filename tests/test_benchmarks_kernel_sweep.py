@@ -6,24 +6,8 @@ orientation is the layout decision), and the sweep compiles/runs/verifies every 
 the numpy oracle. The invariant asserted here is CORRECTNESS: every transparent candidate reproduces
 the oracle and ``best()`` returns a correct one. Timing is not asserted (noisy on a shared host)."""
 
-from dace.transformation.layout.brute_force import best, sweep
-from dace.transformation.layout.timing import compute_region_timer
-
-from relayout.benchmarks import k04_mvt, k11_thomas, k12_dlt_stencil, k15_colstore
-
-
-def _sdfg_candidates(program, candidate_dict):
-    """Turn ``{name: apply}`` into ``{name: make_sdfg}`` -- build a fresh SDFG and apply the layout."""
-
-    def make_for(apply):
-        def make():
-            sdfg = program.to_sdfg(simplify=True)
-            apply(sdfg)
-            return sdfg
-
-        return make
-
-    return {name: make_for(apply) for name, apply in candidate_dict.items()}
+from relayout.benchmarks import build, k04_mvt, k11_thomas, k12_dlt_stencil, k15_colstore
+from relayout.search.measure import best, compute_timer, sweep, time_call
 
 
 def test_k04_mvt_layout_sweep_all_verify():
@@ -31,10 +15,10 @@ def test_k04_mvt_layout_sweep_all_verify():
     n = 24
     inputs = k04_mvt.make_inputs(n)
     reference = k04_mvt.oracle(inputs["A"], inputs["y1"], inputs["y2"])
-    candidates = _sdfg_candidates(k04_mvt.mvt, k04_mvt.candidates())
+    candidates = build(k04_mvt.mvt, k04_mvt.candidates())
 
-    results = sweep(candidates, k04_mvt.run_closure(inputs, n), reference, do_time=False)
-    assert set(candidates) == {"permute_A_01", "permute_A_10"}
+    results = sweep(candidates, k04_mvt.run_closure(inputs, n), reference, timer=time_call, reps=1, warmup=0)
+    assert {c.name for c in candidates} == {"identity", "A:perm10"}
     assert all(r.correct for r in results), [(r.name, r.error) for r in results]
     assert best(results) is not None
 
@@ -44,9 +28,9 @@ def test_k15_colstore_layout_sweep_all_verify():
     n, c = 32, 8
     inputs = k15_colstore.make_inputs(n, c)
     reference = k15_colstore.oracle(inputs["T"])
-    candidates = _sdfg_candidates(k15_colstore.colsum, k15_colstore.candidates())
+    candidates = build(k15_colstore.colsum, k15_colstore.candidates())
 
-    results = sweep(candidates, k15_colstore.run_closure(inputs, n, c), reference, do_time=False)
+    results = sweep(candidates, k15_colstore.run_closure(inputs, n, c), reference, timer=time_call, reps=1, warmup=0)
     assert all(r.correct for r in results), [(r.name, r.error) for r in results]
     assert best(results) is not None
 
@@ -57,28 +41,25 @@ def test_k11_thomas_layout_sweep_timed():
     k, nb = 12, 40
     inputs = k11_thomas.make_inputs(k, nb)
     reference = k11_thomas.oracle(inputs["a"], inputs["b"], inputs["c"], inputs["d"])
-    candidates = _sdfg_candidates(k11_thomas.thomas, k11_thomas.candidates())
+    candidates = build(k11_thomas.thomas, k11_thomas.candidates())
 
-    results = sweep(
-        candidates, k11_thomas.run_closure(inputs, k, nb), reference, reps=2, warmup=1, timer=compute_region_timer
-    )
-    assert set(candidates) == {"interleaved", "system_major"}
+    results = sweep(candidates, k11_thomas.run_closure(inputs, k, nb), reference, timer=compute_timer, reps=2, warmup=1)
+    assert {c.name for c in candidates} == {"interleaved", "system_major"}
     assert all(r.correct for r in results), [(r.name, r.error) for r in results]
     # every correct candidate has a compute-region time recorded
-    assert all(r.time is not None and r.time >= 0.0 for r in results)
+    assert all(r.seconds is not None and r.seconds >= 0.0 for r in results)
     assert best(results) is not None
 
 
-def test_k12_dlt_stencil_block_sweep_all_verify():
-    """DLT stencil: the Block family over x (unblocked + [N/V, V]) reproduces the 3-point stencil;
-    the run closure reshapes the flat input into each candidate's blocked shape."""
+def test_k12_dlt_stencil_lifted_sweep_all_verify():
+    """DLT stencil: x as it is and dimension-lifted to [V, N/V] reproduce the 3-point stencil."""
     n = 32  # divisible by every block factor
     inputs = k12_dlt_stencil.make_inputs(n)
     reference = k12_dlt_stencil.oracle(inputs["x"])
-    candidates = _sdfg_candidates(k12_dlt_stencil.stencil, k12_dlt_stencil.candidates())
-    assert set(candidates) == {"noblock_x", "block_x_d0_4", "block_x_d0_8"}
+    candidates = build(k12_dlt_stencil.stencil, k12_dlt_stencil.candidates())
+    assert {c.name for c in candidates} == {"identity", "x:dlt4", "x:dlt8"}
 
-    results = sweep(candidates, k12_dlt_stencil.run_closure(inputs, n), reference, do_time=False)
+    results = sweep(candidates, k12_dlt_stencil.run_closure(inputs, n), reference, timer=time_call, reps=1, warmup=0)
     assert all(r.correct for r in results), [(r.name, r.error) for r in results]
     assert best(results) is not None
 
@@ -87,5 +68,5 @@ if __name__ == "__main__":
     test_k04_mvt_layout_sweep_all_verify()
     test_k15_colstore_layout_sweep_all_verify()
     test_k11_thomas_layout_sweep_timed()
-    test_k12_dlt_stencil_block_sweep_all_verify()
+    test_k12_dlt_stencil_lifted_sweep_all_verify()
     print("kernel sweep tests PASS")

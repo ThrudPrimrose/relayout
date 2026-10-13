@@ -12,8 +12,7 @@ The layout decision is the dimension order of ``A`` -- one global Permute. In C-
 is unit-stride, so ``[0,1,2]`` (K last) is VERTICAL-first (each contiguous run is one level column, as
 in the ICON (nproma, nlev, nblock) GPU order) while a permutation putting a horizontal axis last is
 HORIZONTAL-first (ICON's (nproma, nlev) Fortran default). The sweep enumerates every permutation of
-``A``; the permute is transparent (``add_permute_maps`` wraps the input and permutes each stencil
-memlet subset), so every candidate must reproduce the oracle -- the sweep only picks the fastest.
+``A``; the permute is transparent, so every candidate must reproduce the oracle -- the sweep only picks the fastest.
 
 Boundaries (i,j,k on any face) are never written and stay zero, matching the interior-only ICON
 tendency stencil.
@@ -25,7 +24,9 @@ simulations on GPUs," GMD 2022 ((nproma, nlev, nblocks) unit-stride order); SC26
 
 import dace
 import numpy
-from dace.transformation.layout.brute_force import permutation_candidates
+
+from relayout.benchmarks import layouts_of
+from relayout.search.layouts import permutations
 
 NI, NJ, NK = dace.symbol("NI"), dace.symbol("NJ"), dace.symbol("NK")
 WV, WH = 0.5, 0.25
@@ -53,7 +54,7 @@ def make_inputs(ni, nj, nk, seed=0):
 
 def candidates():
     """The global layout candidates: every dimension permutation of ``A`` (vertical-first, etc.)."""
-    return dict(permutation_candidates("A", 3))
+    return layouts_of("A", permutations("A", 3))
 
 
 def run_closure(inputs, ni, nj, nk):

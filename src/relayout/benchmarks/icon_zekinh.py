@@ -20,9 +20,9 @@ Each ``z_kin_hor_e[edge_blk[...], jk, edge_idx[...]]`` lowers through ``add_indi
 Indirection tasklet reads the whole field via a dynamic memlet with the two connectivity entries fed
 in as index memlets. The tables ``edge_idx`` / ``edge_blk`` are int64 inputs.
 
-Two families of global layout decision are exposed, both transparent (``add_permute_maps`` wraps the
-input and the permute recurses into the indirection's nested SDFG, so every candidate reproduces the
-oracle -- the sweep only picks the physical layout):
+Two families of global layout decision are exposed, both transparent (the permute reaches into the
+indirection's nested SDFG, so every candidate reproduces the oracle -- the sweep only picks the
+physical layout):
 
   * the GATHERED field ``z_kin_hor_e`` -- ``[NB, NLEV, NPROMA]`` orderings (ICON's blocked
     ``(nblock, nlev, nproma)`` Fortran default vs level-contiguous / vertical-first, etc.). The permute
@@ -32,9 +32,6 @@ oracle -- the sweep only picks the physical layout):
     block / in-block / stencil-arm axes is contiguous). These are read by affine subscripts, so every
     permutation carries like e6's ``cell_idx`` / ``vert_idx``.
 
-Blocking the gathered field ``z_kin_hor_e`` is NOT transparent here and is deferred: ``SplitDimensions``
-raises the field's rank while the Indirection tasklet's index expression stays lower-rank, so the
-gather reads the wrong element (same as e6; see ``candidates``).
 
 Source: G. Zaengl, D. Reinert, P. Ripodas, M. Baldauf, "The ICON modelling framework of DWD and
 MPI-M," QJRMS 141, 2015 (edge/cell connectivity, e_bln barycentric interpolation); M. Giorgetta et
@@ -44,7 +41,9 @@ storage order); SC26 layout paper (indirect-stencil connectivity layout).
 
 import dace
 import numpy
-from dace.transformation.layout.brute_force import permutation_candidates
+
+from relayout.benchmarks import layouts_of
+from relayout.search.layouts import permutations
 
 NB, NLEV, NPROMA = dace.symbol("NB"), dace.symbol("NLEV"), dace.symbol("NPROMA")
 
@@ -103,41 +102,20 @@ def candidates():
       * ``edge_idx`` / ``edge_blk`` -- connectivity-table orientation over ``[NB, NPROMA, 3]``. Read by
         affine subscripts, so every permutation carries (like e6's ``cell_idx`` / ``vert_idx``).
 
-    Every permute is transparent (``add_permute_maps`` wraps the input), so all candidates reproduce
-    the oracle; the sweep only picks the fastest physical layout.
+    Every permute is transparent, so all candidates reproduce the oracle; the sweep only picks the fastest physical layout.
 
-    Blocking ``z_kin_hor_e`` is deliberately omitted: ``SplitDimensions`` raises the field's rank while
-    the Indirection tasklet's index expression stays lower-rank, so the gather would read the wrong
-    element -- deferred, same as e6.
     """
     cands = {}
     for arr in ("z_kin_hor_e", "edge_idx", "edge_blk"):
-        cands.update(permutation_candidates(arr, 3))
+        cands.update(layouts_of(arr, permutations(arr, 3)))
     return cands
 
 
-def _pack(arr, desc_shape):
-    """Lay a logical input out into the candidate descriptor shape. Under ``add_permute_maps`` the
-    input descriptor keeps its logical shape (the transpose happens inside the SDFG), so this is a
-    plain copy; a real transpose branch is kept for a descriptor whose axes are a pure reversal."""
-    if tuple(arr.shape) == tuple(desc_shape):
-        return arr.copy()
-    if tuple(desc_shape) == tuple(reversed(arr.shape)):
-        return arr.T.copy()
-    return arr.reshape(desc_shape).copy()
-
-
 def run_closure(inputs, nb, nlev, nproma):
-    """A ``run(sdfg) -> outputs`` closure: physically packs every input into whatever shape the
-    candidate's descriptor specifies (read from ``sdfg.arrays[name].shape``) and binds a fresh zeroed
-    ``z_ekinh`` each call. The output is never permuted, so it stays ``[NB, NLEV, NPROMA]``."""
-    syms = {NB: nb, NLEV: nlev, NPROMA: nproma}
+    """A ``run(sdfg) -> outputs`` closure for the sweep: binds copies of the inputs and fresh outputs each call."""
 
     def run(sdfg):
-        args = {}
-        for name, arr in inputs.items():
-            desc_shape = tuple(int(dace.symbolic.evaluate(s, syms)) for s in sdfg.arrays[name].shape)
-            args[name] = _pack(arr, desc_shape)
+        args = {name: arr.copy() for name, arr in inputs.items()}
         out = numpy.zeros((nb, nlev, nproma))
         sdfg(NB=nb, NLEV=nlev, NPROMA=nproma, z_ekinh=out, **args)
         return {"z_ekinh": out}

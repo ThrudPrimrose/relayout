@@ -13,7 +13,9 @@ al., PAX VLDB'01.
 
 import dace
 import numpy
-from dace.transformation.layout.brute_force import permutation_candidates
+
+from relayout.benchmarks import layouts_of
+from relayout.search.layouts import permutations
 
 N, C = dace.symbol("N"), dace.symbol("C")
 
@@ -34,7 +36,7 @@ def make_inputs(n, c, seed=0):
 
 
 def candidates():
-    return dict(permutation_candidates("T", 2))
+    return layouts_of("T", permutations("T", 2))
 
 
 def run_closure(inputs, n, c):

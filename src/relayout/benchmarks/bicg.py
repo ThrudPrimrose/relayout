@@ -9,9 +9,8 @@ streams it row-major (contract the M axis), ``s`` streams it column-major (contr
 single physical layout is best for both, so the global layout decision the sweep explores is the
 dimension order of ``A`` (row-major vs column-major) -- exactly the k04 mvt witness, but the two
 reductions here contract into two INDEPENDENT WCR outputs (``q[N]`` and ``s[M]``) rather than the
-matched-shape pair of mvt. The permutation is transparent (``add_permute_maps`` wraps the input and
-permutes each memlet subset), so every candidate reproduces the oracle -- the sweep only picks the
-fastest.
+matched-shape pair of mvt. The permutation is transparent, so every candidate reproduces the oracle -- the
+sweep only picks the fastest.
 
 Source: Pouchet & Yuki, PolyBench/C 4.2 (bicg, the BiConjugate Gradient stabilized kernel); Ziogas et
 al., NPBench (ICS'21). Reduction (not BLAS gemv) form so the layout is honest -- BLAS packs operands
@@ -20,7 +19,9 @@ internally and would hide the read-orientation conflict.
 
 import dace
 import numpy
-from dace.transformation.layout.brute_force import permutation_candidates
+
+from relayout.benchmarks import layouts_of
+from relayout.search.layouts import permutations
 
 N, M = dace.symbol("N"), dace.symbol("M")
 
@@ -44,7 +45,7 @@ def make_inputs(n, m, seed=0):
 def candidates():
     """The global layout candidates for this kernel: every dimension permutation of ``A`` (row-major
     vs column-major), the read-orientation conflict the pair nest exposes."""
-    return dict(permutation_candidates("A", 2))
+    return layouts_of("A", permutations("A", 2))
 
 
 def run_closure(inputs, n, m):

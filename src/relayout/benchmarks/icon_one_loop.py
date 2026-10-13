@@ -21,9 +21,8 @@ the last axis is unit-stride, so the identity ``[0,1,2]`` (NPROMA last) is the I
 contiguous (VERTICAL-first), which is what the ``jk``/``jk-1`` backward reference streams. ``vn`` is
 the vertical-stride-sensitive field (it is the one read at both ``jk`` and ``jk-1``), so its
 permutation is the primary lever, exactly as ``A`` is in k07; ``vt`` and ``wgtfac_e`` are also swept
-because their level-difference read is layout-sensitive too. Every permute is transparent
-(``add_permute_maps`` wraps the input and permutes each memlet subset), so every candidate reproduces
-the oracle -- the sweep only picks the fastest physical layout.
+because their level-difference read is layout-sensitive too. Every permute is transparent,
+so every candidate reproduces the oracle -- the sweep only picks the fastest physical layout.
 
 Source: G. Zaengl, D. Reinert, P. Ripodas, M. Baldauf, "The ICON modelling framework of DWD and
 MPI-M," QJRMS 141, 2015 (velocity tendencies, vertical half-level stencil); M. Giorgetta et al., "The
@@ -33,7 +32,9 @@ order); SC26 layout paper SS IV-D.
 
 import dace
 import numpy
-from dace.transformation.layout.brute_force import permutation_candidates
+
+from relayout.benchmarks import layouts_of
+from relayout.search.layouts import permutations
 
 NB, NLEV, NPROMA = dace.symbol("NB"), dace.symbol("NLEV"), dace.symbol("NPROMA")
 
@@ -77,38 +78,19 @@ def make_inputs(nb=2, nlev=16, nproma=8, seed=0):
 def candidates():
     """The global layout candidates: every dimension permutation of each read field (identity
     included). ``vn`` is the vertical-stride-sensitive field read at ``jk`` and ``jk-1``; ``vt`` and
-    ``wgtfac_e`` are the level-difference operands. Every permute is transparent (``add_permute_maps``
-    wraps the input), so all candidates reproduce the oracle -- the sweep only picks the fastest."""
+    ``wgtfac_e`` are the level-difference operands. Every permute is transparent, so all candidates
+    reproduce the oracle -- the sweep only picks the fastest."""
     cands = {}
     for arr in ("vn", "vt", "wgtfac_e"):
-        cands.update(permutation_candidates(arr, 3))
+        cands.update(layouts_of(arr, permutations(arr, 3)))
     return cands
 
 
-def _pack(arr, desc_shape):
-    """Lay a logical input out into the candidate descriptor shape. Under ``add_permute_maps`` the
-    input descriptor keeps its logical shape (the transpose happens inside the SDFG), so this is a
-    plain copy; a real transpose branch is kept for a descriptor whose axes have been reordered."""
-    if tuple(arr.shape) == tuple(desc_shape):
-        return arr.copy()
-    if sorted(desc_shape) == sorted(arr.shape):
-        perm = [arr.shape.index(s) for s in desc_shape]
-        return numpy.transpose(arr, perm).copy()
-    return arr.reshape(desc_shape).copy()
-
-
 def run_closure(inputs, nb=2, nlev=16, nproma=8):
-    """A ``run(sdfg) -> outputs`` closure for the sweep: physically packs every input into whatever
-    shape the candidate's descriptor specifies (read from ``sdfg.arrays[name].shape``) and binds fresh
-    zeroed ``vn_ie`` / ``zkh`` each call. The outputs are never permuted, so they stay
-    ``[NB, NLEV, NPROMA]`` (and their untouched level 0 stays 0)."""
-    syms = {NB: nb, NLEV: nlev, NPROMA: nproma}
+    """A ``run(sdfg) -> outputs`` closure for the sweep: binds copies of the inputs and fresh outputs each call."""
 
     def run(sdfg):
-        args = {}
-        for name, arr in inputs.items():
-            desc_shape = tuple(int(dace.symbolic.evaluate(s, syms)) for s in sdfg.arrays[name].shape)
-            args[name] = _pack(arr, desc_shape)
+        args = {name: arr.copy() for name, arr in inputs.items()}
         vn_ie = numpy.zeros((nb, nlev, nproma))
         zkh = numpy.zeros((nb, nlev, nproma))
         sdfg(NB=nb, NLEV=nlev, NPROMA=nproma, vn_ie=vn_ie, zkh=zkh, **args)

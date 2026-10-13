@@ -15,8 +15,8 @@ but here the atom axis ``NA`` is read through the data-dependent neighbour index
     atom-outer    (Nkz, NA, NE, .) : each atom's energy spectrum contiguous, so the ``E-w`` window
                                      over a gathered neighbour atom is a contiguous read (Permute).
 
-``G`` is an input, and the Permute is transparent (``add_permute_maps`` rewrites every read of ``G``,
-including the indirect gather), so both candidates reproduce the oracle; the sweep only picks the
+``G`` is an input, and the Permute is transparent (every read of ``G`` follows it, including
+the indirect gather), so both candidates reproduce the oracle; the sweep only picks the
 physical order. This is the single-process form of the distributed OMEN transpose in
 ``tests/library/mpi/mpi_omen_transpose_test.py`` -- the same batch-axis reorientation, here local and
 with the neighbour gather k10 abstracts away.
@@ -28,7 +28,10 @@ Transport Simulations," SC'19 (Gordon Bell finalist; arXiv:1912.10024); npbench 
 
 import dace
 import numpy
-from dace.transformation.layout.permute_dimensions import PermuteDimensions
+
+from relayout.benchmarks import apply_layout
+from relayout.ops import Permute
+from relayout.search.layouts import Layout
 
 NA, NE = dace.symbol("NA"), dace.symbol("NE")
 Nkz, NB, Nqz, Nw, Norb, N3D = 2, 2, 2, 2, 3, 2  # small compile-time block/momentum dims (npbench 'S' preset)
@@ -92,7 +95,7 @@ def candidates():
     gathered neighbour's energy window is contiguous) -- one transparent Permute, the k10 decision."""
 
     def atom_outer(sdfg):
-        PermuteDimensions(permute_map={"G": [0, 2, 1, 3, 4]}, add_permute_maps=True).apply_pass(sdfg, {})
+        apply_layout(sdfg, "G", Layout("atom_outer", (Permute("G", ("i0", "i2", "i1", "i3", "i4")),)))
 
     return {"e_outer": (lambda sdfg: None), "atom_outer": atom_outer}
 

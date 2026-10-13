@@ -34,9 +34,14 @@ def leaf_edges(state: SDFGState, entry: nodes.MapEntry) -> list:
 
 
 def block_widths(state: SDFGState, entry: nodes.MapEntry) -> dict[str, int]:
-    """Each parameter of ``entry`` some access reads as ``p // b`` or ``p % b``, with one constant ``b``
-    across them (a plain use of ``p`` becomes ``b*p_o + p`` when tiled and is no obstacle)."""
-    params = {p: symbolic.symbol(p) for p in entry.map.params}
+    """Each parameter of ``entry`` that :func:`tile_by_block` can tile (from 0 by 1) and some access reads
+    as ``p // b`` or ``p % b``, with one constant ``b`` across them (a plain use of ``p`` becomes ``b*p_o + p``
+    when tiled and is no obstacle)."""
+    params = {
+        p: symbolic.symbol(p)
+        for p, (begin, _, step) in zip(entry.map.params, entry.map.range, strict=True)
+        if begin == 0 and step == 1
+    }
     widths: dict[str, set[int]] = {p: set() for p in params}
     for edge in leaf_edges(state, entry):
         for begin, _, _ in edge.data.subset.ranges:
@@ -83,7 +88,7 @@ def tile_by_block(sdfg: dace.SDFG, state: SDFGState, entry: nodes.MapEntry, para
     ``param % width`` is ``param``."""
     begin, _, step = entry.map.range[entry.map.params.index(param)]
     if begin != 0 or step != 1:
-        return
+        raise ValueError(f"{entry.map.label}: {param!r} runs from {begin} by {step}; a tile starts at 0 by 1")
     StripMining.apply_to(
         sdfg,
         options={"dim_idx": entry.map.params.index(param), "tile_size": width, "skew": True, "new_dim_prefix": "tile"},

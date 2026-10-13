@@ -23,8 +23,10 @@ isolation). Elementwise accumulate form so the layout is honest -- a BLAS ``zaxp
 
 import dace
 import numpy
-from dace.libraries.layout.shuffle import register_shuffle
-from dace.transformation.layout.brute_force import shuffle_candidates
+
+from relayout.benchmarks import layouts_of, shuffled
+from relayout.ops import Block, Shuffle
+from relayout.search.layouts import IDENTITY, Layout
 
 N = dace.symbol("N")
 
@@ -48,13 +50,13 @@ def make_inputs(n, seed=0):
 
 
 def candidates():
-    """The layout candidates: renumber ``x`` by each registered bijection ``sigma`` (plus the
-    unshuffled base). Both are self-consistent bijections on ``[0, N)`` -- the XOR swizzle needs
-    ``N`` a multiple of 4 (it permutes within each block of 4); the cyclic shift holds for any ``N``.
-    Every Shuffle is transparent, so all candidates reproduce the oracle."""
-    register_shuffle("gas_xor", "i ^ 3", "i ^ 3")
-    register_shuffle("gas_cyc", "(i + 1) % N", "(i + N - 1) % N")
-    return dict(shuffle_candidates("x", 0, ["gas_xor", "gas_cyc"]))
+    """The layout candidates: renumber ``x`` by each bijection ``sigma`` (plus the unshuffled base). The
+    XOR swizzle ``i ^ 3`` permutes within each block of 4 (``3 - f`` on the block offset ``f``, so ``N``
+    a multiple of 4); the cyclic shift holds for any ``N``. Every Shuffle is transparent, so all candidates
+    reproduce the oracle."""
+    xor = Layout("gas_xor", (Block("x", "i0", "4", ("o", "f")), Shuffle("x", ("f",), ("3 - f",), ("3 - f",))))
+    cyclic = shuffled("x", "gas_cyc", "(i0 + 1) % N", "(i0 + N - 1) % N")
+    return layouts_of("x", [Layout(IDENTITY), xor, cyclic])
 
 
 def run_closure(inputs, n):

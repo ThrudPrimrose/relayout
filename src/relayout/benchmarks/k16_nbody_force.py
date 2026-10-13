@@ -21,7 +21,9 @@ JOSS'22); SC26 layout paper (Permute over an O(N^2) reduction).
 
 import dace
 import numpy
-from dace.transformation.layout.brute_force import permutation_candidates
+
+from relayout.benchmarks import layouts_of
+from relayout.search.layouts import permutations
 
 N = dace.symbol("N")
 
@@ -73,7 +75,7 @@ def make_inputs(n, seed=0):
 
 def candidates():
     """AoS (N,3) identity vs SoA (3,N): one transparent Permute of ``pos``'s two axes."""
-    return dict(permutation_candidates("pos", 2))  # aos: permute_pos_01, soa: permute_pos_10
+    return layouts_of("pos", permutations("pos", 2))  # aos: permute_pos_01, soa: permute_pos_10
 
 
 def run_closure(inputs, n):

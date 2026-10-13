@@ -3,17 +3,20 @@
 
     y[i] = w0*x[i-1] + w1*x[i] + w2*x[i+1]
 
-The DLT layout reshapes the flat array ``x`` to ``[N/V, V]`` (Block), so the three shifted streams
-``x[i-1] / x[i] / x[i+1]`` become row-shifted views of one blocked array instead of three
-overlapping unaligned streams. The sweep exercises the Block family over ``x`` (a boundary-crossing
-neighbor access -- SplitDimensions blocks the offset indices ``x[i-1]``/``x[i+1]`` correctly).
+The DLT layout cuts the flat array ``x`` into ``[N/V, V]`` (Block) and transposes it to ``[V, N/V]``
+(Permute), so the V lanes of a vector read V consecutive blocks and the three shifted streams
+``x[i-1] / x[i] / x[i+1]`` stay aligned. The sweep exercises that layout over ``x`` for each V
+(a boundary-crossing neighbor access: the offset indices ``x[i-1]``/``x[i+1]`` cross block borders).
 
 Source: Henretty et al., CC'11 (data-layout transformation for SIMD stencils).
 """
 
 import dace
 import numpy
-from dace.transformation.layout.brute_force import block_candidates
+
+from relayout.benchmarks import layouts_of
+from relayout.ops import Block, Permute
+from relayout.search.layouts import IDENTITY, Layout
 
 N = dace.symbol("N")
 W0, W1, W2 = 0.25, 0.5, 0.25
@@ -36,18 +39,17 @@ def make_inputs(n, seed=0):
 
 
 def candidates():
-    """The Block family over x (unblocked + [N/V, V] for V in {4, 8})."""
-    return dict(block_candidates("x", 1, factors=(4, 8)))
+    """``x`` as it is and dimension-lifted ([V, N/V]) for V in {4, 8}."""
+    lifted = [Layout(f"dlt{v}", (Block("x", "i0", str(v), ("o", "f")), Permute("x", ("f", "o")))) for v in (4, 8)]
+    return layouts_of("x", [Layout(IDENTITY), *lifted])
 
 
 def run_closure(inputs, n):
-    """``run`` reshapes the flat logical x into each candidate's laid-out (blocked) shape."""
+    """A ``run(sdfg) -> outputs`` closure for the sweep: binds a fresh output each call."""
 
     def run(sdfg):
-        x_shape = tuple(int(dace.symbolic.evaluate(s, {N: n})) for s in sdfg.arrays["x"].shape)
-        x_in = inputs["x"].reshape(x_shape).copy()  # packed-C, fresh (not a view)
         y = numpy.zeros(n)
-        sdfg(x=x_in, y=y, N=n)
+        sdfg(x=inputs["x"].copy(), y=y, N=n)
         return {"y": y}
 
     return run

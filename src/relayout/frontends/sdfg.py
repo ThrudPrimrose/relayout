@@ -74,6 +74,10 @@ __all__ = [
 #: The prefix of the transient an argument is laid out into.
 LAID = "laid_"
 
+#: The label prefix of every map converting between layouts (an argument into its layout and back, or one
+#: layout into another), which no program's own map has (dace labels those after the program's module).
+CONVERSION = "relayout_conversion_"
+
 
 class LayoutError(ValueError):
     """A use of an array the layout cannot be carried through."""
@@ -697,9 +701,9 @@ def conversion(
     """A map over the logical index space of ``shape`` moving ``logical`` into ``laid`` (or back)."""
     logical_at = Laid(IndexMap.identity(shape))
     if inward:
-        transfer(state, f"relayout_in_{logical}", logical, logical_at, laid, placement, shape)
+        transfer(state, f"{CONVERSION}in_{logical}", logical, logical_at, laid, placement, shape)
     else:
-        transfer(state, f"relayout_out_{logical}", laid, placement, logical, logical_at, shape)
+        transfer(state, f"{CONVERSION}out_{logical}", laid, placement, logical, logical_at, shape)
 
 
 def is_read(sdfg: dace.SDFG, name: str) -> bool:
@@ -944,7 +948,7 @@ def member_transfer(state: SDFGState, field: str, into: str, shape: Sequence[str
     at = ", ".join(params)
     if inward:
         state.add_mapped_tasklet(
-            f"zip_in_{field}",
+            f"{CONVERSION}zip_in_{field}",
             ranges,
             {"__inp": dace.Memlet(f"{field}[{at}]"), "__zin": dace.Memlet(f"{into}[{at}]")},
             f"__z = __zin\n__z.{field} = __inp",
@@ -953,7 +957,7 @@ def member_transfer(state: SDFGState, field: str, into: str, shape: Sequence[str
         )
     else:
         state.add_mapped_tasklet(
-            f"zip_out_{field}",
+            f"{CONVERSION}zip_out_{field}",
             ranges,
             {"__z": dace.Memlet(f"{into}[{at}]")},
             f"__out = __z.{field}",

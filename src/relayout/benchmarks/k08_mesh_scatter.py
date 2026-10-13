@@ -24,7 +24,7 @@ Layout decision -- the physical layout of the per-cell padded gather table ``tsg
 column of the ``(edge, sign)`` slot table):
 
     AoS  : ``[NC, V]``  -- a cell's V slots are contiguous   (identity)
-    SoA  : ``[V, NC]``  -- slot ``v`` across all cells is contiguous (Permute, add_permute_maps)
+    SoA  : ``[V, NC]``  -- slot ``v`` across all cells is contiguous (Permute)
     padded: ``[NC, V+p]`` -- the valence axis grown by trailing pad (Pad primitive)
 
 Both are transparent (the Permute wrap-around transpose / the Pad's never-accessed trailing cells
@@ -40,7 +40,7 @@ Attribution:
 
 A Shuffle candidate renumbers the per-cell field ``x`` by a closed-form cell bijection ``sigma``
 (cyclic shift / reflection -- a mesh reorder). ``x`` is consumed through the runtime indirection
-``x[e0[e]]``; ``ShuffleElements`` renumbers the store (``x'[i] = x[sigma(i)]``) and composes the
+``x[e0[e]]``; the Shuffle renumbers the store (``x'[i] = x[sigma(i)]``) and composes the
 inverse into that consumer (``x'[sigma^{-1}(e0[e])]``), so the reorder is transparent and ``x`` is
 still bound as-is.
 
@@ -53,10 +53,10 @@ table ``tsg``; the edge-index table stays a flat CSR-style gather index.
 
 import dace
 import numpy
-from dace.libraries.layout.shuffle import register_shuffle
-from dace.transformation.layout.brute_force import permutation_candidates, shuffle_candidates
-from dace.transformation.layout.pad_dimensions import PadDimensions
-from dace.transformation.layout.prepare import prepare_for_layout
+
+from relayout.benchmarks import layouts_of, shuffled
+from relayout.ops import Pad
+from relayout.search.layouts import Layout, permutations
 
 NC, NE, V = dace.symbol("NC"), dace.symbol("NE"), dace.symbol("V")
 
@@ -125,87 +125,43 @@ def make_inputs(n=8, seed=0):
     return {"x": x, "e0": e0, "e1": e1, "tab": tab, "tsg": tsg}
 
 
-def _prepared(apply):
-    """Wrap a layout ``apply`` so it first normalizes the SDFG (``prepare_for_layout``): this kernel
-    has an indirection nested SDFG + a WCR reduction, so the passes need the widened normal form."""
-
-    def wrapped(sdfg):
-        prepare_for_layout(sdfg, validate=False)
-        apply(sdfg)
-
-    return wrapped
-
-
-#: Closed-form cell reorderings for the Shuffle candidate. Both are self-inverse-checked bijections
-#: on ``[0, NC)`` valid for ANY ``NC``: a cyclic shift and a reflection (an involution). Registered at
-#: import so the sympy functions / C lowerings exist before ``candidates`` builds the sweep.
-register_shuffle("mesh_cyc", "(i + 1) % NC", "(i + NC - 1) % NC")
-register_shuffle("mesh_rev", "NC - 1 - i", "NC - 1 - i")
-
-
 def candidates():
     """The global layout candidates:
 
-      * ``identity``       -- AoS ``[NC, V]`` sign table, natural cell order.
-      * ``permute_tsg_10`` -- SoA ``[V, NC]`` sign table (Permute, transparent add_permute_maps).
-      * ``pad_tsg_2`` / ``pad_tsg_4`` -- grow the valence axis to ``[NC, V+p]`` (the Pad primitive).
-      * ``shuffle_x_mesh_cyc`` / ``shuffle_x_mesh_rev`` -- renumber the cell field ``x`` by a
-        closed-form mesh reorder (the Shuffle primitive; the reorder is transparent).
+      * ``identity``    -- AoS ``[NC, V]`` sign table, natural cell order.
+      * ``tsg:perm10``  -- SoA ``[V, NC]`` sign table (Permute).
+      * ``tsg:pad2`` / ``tsg:pad4`` -- grow the valence axis to ``[NC, V+p]`` (Pad).
+      * ``x:mesh_cyc`` / ``x:mesh_rev`` -- renumber the cell field ``x`` by a closed-form mesh reorder
+        (Shuffle): a cyclic shift and a reflection, bijections on ``[0, NC)`` for any ``NC``.
 
     Every candidate is transparent, so all reproduce the oracle -- the sweep only picks the layout.
     """
-    cands = {"identity": (lambda sdfg: None)}
-    # Permute family (AoS vs SoA), reusing the brute-force helper; drop the identity permutation
-    # ([0, 1]) since it duplicates ``identity``.
-    for name, apply in permutation_candidates("tsg", 2):
-        if name.endswith("_01"):
-            continue
-        cands[name] = _prepared(apply)
-    # Pad family: grow the valence dimension by each trailing pad amount.
-    for extra in (2, 4):
-
-        def pad_apply(sdfg, extra=extra):
-            PadDimensions(pad_map={"tsg": [0, extra]}).apply_pass(sdfg, {})
-
-        cands[f"pad_tsg_{extra}"] = _prepared(pad_apply)
-    # Shuffle family: renumber ``x`` by each registered mesh reorder, reusing the brute-force helper
-    # (skip its ``noshuffle`` identity, which duplicates ``identity``).
-    for name, apply in shuffle_candidates("x", 0, ["mesh_cyc", "mesh_rev"]):
-        if name.startswith("noshuffle"):
-            continue
-        cands[name] = _prepared(apply)
+    cands = layouts_of("tsg", permutations("tsg", 2))
+    cands.update(layouts_of("tsg", [Layout(f"pad{extra}", (Pad("tsg", "i1", str(extra)),)) for extra in (2, 4)]))
+    mesh = [
+        shuffled("x", "mesh_cyc", "(i0 + 1) % NC", "(i0 + NC - 1) % NC"),
+        shuffled("x", "mesh_rev", "NC - 1 - i0", "NC - 1 - i0"),
+    ]
+    cands.update(layouts_of("x", mesh))
     return cands
 
 
 def run_closure(inputs, n=8):
-    """``run`` lays the sign table ``tsg`` out into each candidate's descriptor shape (identity AoS,
-    padded ``[NC, V+p]``, or -- for the transparent Permute -- the unchanged ``[NC, V]`` external
-    shape), flattens the incident-edge table for the indirect gather, and binds a fresh zeroed ``y``.
-    """
+    """A ``run(sdfg) -> outputs`` closure for the sweep: flattens the incident-edge table for the indirect
+    gather and binds a fresh zeroed ``y``."""
     nc = int(inputs["x"].shape[0])
     ne = int(inputs["e0"].shape[0])
     v = int(inputs["tab"].shape[1])
     tabf = numpy.ascontiguousarray(inputs["tab"].reshape(-1))
 
-    def pack_tsg(shape):
-        # shape is the (evaluated) descriptor of ``tsg`` after the candidate applied.
-        if tuple(shape) == (nc, v):  # identity AoS, or transparent Permute (external shape kept)
-            return inputs["tsg"].copy()
-        if len(shape) == 2 and shape[0] == nc and shape[1] > v:  # Pad: [NC, V+p]
-            out = numpy.zeros(shape, dtype=numpy.float64)
-            out[:, :v] = inputs["tsg"]
-            return out
-        raise ValueError(f"unexpected tsg descriptor shape {shape}")
-
     def run(sdfg):
-        shape = tuple(int(dace.symbolic.evaluate(s, {NC: nc, NE: ne, V: v})) for s in sdfg.arrays["tsg"].shape)
         y = numpy.zeros(nc)
         sdfg(
             x=inputs["x"].copy(),
             e0=inputs["e0"].copy(),
             e1=inputs["e1"].copy(),
             tabf=tabf.copy(),
-            tsg=pack_tsg(shape),
+            tsg=inputs["tsg"].copy(),
             y=y,
             NC=nc,
             NE=ne,

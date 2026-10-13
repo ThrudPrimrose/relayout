@@ -6,8 +6,7 @@
 
 One array ``A`` is read in BOTH orientations, so no single physical layout is best for both nests --
 the global layout decision the sweep explores by permuting ``A`` (row-major vs column-major). The
-permutation is transparent (``add_permute_maps`` wraps the input), so every candidate must reproduce
-the oracle.
+permutation is transparent, so every candidate must reproduce the oracle.
 
 Source: Pouchet & Yuki, PolyBench/C 4.2; Ziogas et al., NPBench (ICS'21). Reduction (not BLAS gemv)
 form so the layout is honest -- BLAS packs operands internally and would hide it.
@@ -15,7 +14,9 @@ form so the layout is honest -- BLAS packs operands internally and would hide it
 
 import dace
 import numpy
-from dace.transformation.layout.brute_force import permutation_candidates
+
+from relayout.benchmarks import layouts_of
+from relayout.search.layouts import permutations
 
 N = dace.symbol("N")
 
@@ -38,7 +39,7 @@ def make_inputs(n, seed=0):
 
 def candidates():
     """The global layout candidates for this kernel: every dimension permutation of ``A``."""
-    return dict(permutation_candidates("A", 2))
+    return layouts_of("A", permutations("A", 2))
 
 
 def run_closure(inputs, n):

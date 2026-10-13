@@ -14,8 +14,8 @@ The layout decision is the dimension ORDER of ``G``'s two batch axes -- one glob
     producer-preferred (NE, NA, M, M): a per-energy all-atom slab is contiguous for the producer,
                                        but the consumer's window becomes large-stride.
 
-``G`` is an internal transient, so permuting it is fully transparent (``add_permute_maps`` permutes
-every producer write and consumer read memlet); every candidate reproduces the oracle and the sweep
+``G`` is an internal transient, so permuting it is fully transparent (every producer write and
+consumer read follows it); every candidate reproduces the oracle and the sweep
 only picks the physical order. ``M`` (~ Norb orbitals) and the window ``W`` are small compile-time
 constants -- the ``NA``/``NE`` batch dimensions carry the bandwidth.
 
@@ -26,7 +26,10 @@ finalist; arXiv:1912.10024); NPBench 'sselfeng' (Ziogas et al., ICS'21); SC26 la
 
 import dace
 import numpy
-from dace.transformation.layout.permute_dimensions import PermuteDimensions
+
+from relayout.benchmarks import apply_layout
+from relayout.ops import Permute
+from relayout.search.layouts import Layout
 
 NA, NE = dace.symbol("NA"), dace.symbol("NE")
 M = 4  # ~ Norb orbitals per block (small: a block spans a few cache lines)
@@ -75,7 +78,7 @@ def candidates():
     order (NA, NE) identity vs producer order (NE, NA) via a transparent Permute."""
 
     def producer_order(sdfg):
-        PermuteDimensions(permute_map={"G": [1, 0, 2, 3]}, add_permute_maps=True).apply_pass(sdfg, {})
+        apply_layout(sdfg, "G", Layout("ea", (Permute("G", ("i1", "i0", "i2", "i3")),)))
 
     return {"ae_consumer": (lambda sdfg: None), "ea_producer": producer_order}
 

@@ -8,7 +8,7 @@ the vector dimension. The layout decision is the coefficient orientation:
     interleaved  (K, NB): level k of all systems contiguous -> each k-step touches contiguous rows.
     system-major (NB, K): each system contiguous            -> each k-step gathers a stride-K column.
 
-expressed as a Permute of the four coefficient arrays (transparent under add_permute_maps). The
+expressed as a Permute of the four coefficient arrays (transparent). The
 temporaries stay (K, NB) in both, so only the coefficient reads differ.
 
 Source: Laszlo, Giles, Appleyard, ACM TOMS 42(4) 2016 (cuThomasBatch convention); Zaengl et al.,
@@ -17,7 +17,10 @@ QJRMS'15 (ICON vertical solvers).
 
 import dace
 import numpy
-from dace.transformation.layout.permute_dimensions import PermuteDimensions
+
+from relayout.benchmarks import apply_layout
+from relayout.ops import Permute
+from relayout.search.layouts import Layout
 
 K, NB = dace.symbol("K"), dace.symbol("NB")
 
@@ -76,7 +79,8 @@ def candidates():
     """interleaved (K,NB) vs system-major (NB,K): permute all four coefficient arrays."""
 
     def system_major(sdfg):
-        PermuteDimensions(permute_map={n: [1, 0] for n in "abcd"}, add_permute_maps=True).apply_pass(sdfg, {})
+        for array in "abcd":
+            apply_layout(sdfg, array, Layout("system_major", (Permute(array, ("i1", "i0")),)))
 
     return {"interleaved": (lambda sdfg: None), "system_major": system_major}
 

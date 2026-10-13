@@ -21,7 +21,9 @@ FLANN/FAISS IVF); SC26 layout paper (Permute over an all-pairs scan).
 
 import dace
 import numpy
-from dace.transformation.layout.brute_force import permutation_candidates
+
+from relayout.benchmarks import layouts_of
+from relayout.search.layouts import permutations
 
 NR, NQ = dace.symbol("NR"), dace.symbol("NQ")
 D = 3  # spatial dimension (small compile-time constant, like Norb in k10)
@@ -57,7 +59,7 @@ def make_inputs(nr, nq, seed=0):
 
 def candidates():
     """AoS (NR,D) identity vs SoA (D,NR): one transparent Permute of ``ref``'s two axes."""
-    return dict(permutation_candidates("ref", 2))  # permute_ref_01 (aos), permute_ref_10 (soa)
+    return layouts_of("ref", permutations("ref", 2))  # permute_ref_01 (aos), permute_ref_10 (soa)
 
 
 def run_closure(inputs, nr, nq):

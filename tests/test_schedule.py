@@ -36,6 +36,12 @@ def tiled(A: dace.float64[4 * K], B: dace.float64[4 * K]):  # noqa: N803
                 b = 2.0 * a
 
 
+@dace.program
+def interior(A: dace.float64[N], B: dace.float64[N]):  # noqa: N803
+    for i in dace.map[1 : N - 1]:
+        B[i] = A[i] * 2.0
+
+
 def point_accesses(sdfg: dace.SDFG, array: str) -> list[str]:
     return [
         str(e.data.subset)
@@ -108,7 +114,20 @@ def test_a_tiled_map_merges_over_flat_arrays_and_keeps_its_tiles_over_blocked_on
         np.testing.assert_allclose(b, 2 * a)
 
 
+def test_a_map_not_starting_at_zero_keeps_its_blocked_accesses() -> None:
+    """Only a map from 0 by 1 tiles into whole blocks; one from 1 is left as it is (and does not stall the pass)."""
+    sdfg = prepare(interior.to_sdfg(simplify=True))
+    variant(sdfg, "interior")
+    relayout_array(sdfg, "A", layout([Block("A", "i0", "4", ("o", "f"))], ["N"]))
+    canonicalize_schedule(sdfg)
+    a = np.random.default_rng(3).random(12)
+    b = np.zeros(12)
+    sdfg(A=a, B=b, N=12)
+    np.testing.assert_allclose(b[1:-1], 2 * a[1:-1])
+
+
 if __name__ == "__main__":
     test_a_blocked_array_tiles_its_map()
     test_a_permuted_array_puts_its_unit_stride_parameter_innermost()
     test_a_tiled_map_merges_over_flat_arrays_and_keeps_its_tiles_over_blocked_ones()
+    test_a_map_not_starting_at_zero_keeps_its_blocked_accesses()

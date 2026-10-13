@@ -7,8 +7,8 @@
 The single shared matrix ``A`` (shape ``[M, N]``) is read in BOTH orientations -- row-streamed to form
 ``tmp = A x``, then column-streamed to form ``y = A^T tmp`` -- so no single physical layout is best for
 both nests. That is the global layout decision the sweep explores by permuting ``A`` (row-major vs
-column-major). The permutation is transparent (``add_permute_maps`` wraps the input and permutes every
-``A`` memlet subset in both nests), so every candidate must reproduce the oracle -- the sweep only
+column-major). The permutation is transparent (every ``A`` access in both nests follows it), so every
+candidate must reproduce the oracle -- the sweep only
 picks the fastest physical order.
 
 ``tmp`` is a zeroed transient that must be FULLY accumulated (first WCR nest) before it is read (second
@@ -24,7 +24,9 @@ through the transient ``tmp`` instead of writing two independent outputs.
 
 import dace
 import numpy
-from dace.transformation.layout.brute_force import permutation_candidates
+
+from relayout.benchmarks import layouts_of
+from relayout.search.layouts import permutations
 
 M, N = dace.symbol("M"), dace.symbol("N")
 
@@ -50,9 +52,9 @@ def make_inputs(m, n, seed=0):
 
 def candidates():
     """The global layout candidates for this kernel: every dimension permutation of the shared ``A``
-    (row-major vs column-major storage). All are transparent under ``add_permute_maps``, so every
-    candidate reproduces the oracle."""
-    return dict(permutation_candidates("A", 2))
+    (row-major vs column-major storage). All are transparent, so every candidate reproduces the
+    oracle."""
+    return layouts_of("A", permutations("A", 2))
 
 
 def run_closure(inputs, m, n):

@@ -22,8 +22,8 @@ oracle. The sweep picks the layout; the shuffle algebra guarantees correctness.
 SIMPLIFICATION (noted honestly): the true Eytzinger BFS index is defined by an
 in-order tree traversal and is NOT a closed-form arithmetic function of the
 element index over a RUNTIME symbol ``N`` -- it needs ``N`` (and the tree depth)
-concretely to expand. ``register_shuffle`` requires a closed-form
-forward/inverse pair over the reserved index ``i`` (+ SDFG symbols), so we model
+concretely to expand. A Shuffle takes a closed-form
+forward/inverse pair over the dimension's digit ``i0`` (+ SDFG symbols), so we model
 the Eytzinger decision with a closed-form *affine stand-in*: a median-to-front
 cyclic renumbering ``sigma(i) = (i + N//2) % N`` that, like Eytzinger, pulls the
 median (the BST root) to the front of the array. Alongside it we register two
@@ -41,19 +41,19 @@ layout decision).
 
 import dace
 import numpy
-from dace.libraries.layout.shuffle import register_shuffle
-from dace.transformation.layout.brute_force import shuffle_candidates
+
+from relayout.benchmarks import layouts_of, shuffled
+from relayout.search.layouts import IDENTITY, Layout
 
 N = dace.symbol("N")
 
-# The Eytzinger stand-in (median-to-front) plus two more closed-form transparent
-# reorderings. Registered at import so ``candidates()`` (whose apply closures call
-# ``ShuffleElements`` -> ``get_shuffle``) works standalone. All are bijections on
-# ``[0, N)`` for any ``N`` (floored ``%`` via ``shuffle_pymod``, floored ``//``).
-SHUFFLES = ("eytzinger", "cyc", "rev")
-register_shuffle("eytzinger", "(i + N // 2) % N", "(i + N - N // 2) % N")  # median-to-front cyclic stand-in
-register_shuffle("cyc", "(i + 1) % N", "(i + N - 1) % N")  # unit cyclic shift
-register_shuffle("rev", "N - 1 - i", "N - 1 - i")  # reversal (an involution)
+#: The Eytzinger stand-in (median-to-front) plus two more closed-form transparent reorderings; each a
+#: bijection on ``[0, N)`` for any ``N``.
+SHUFFLES = (
+    shuffled("A", "eytzinger", "(i0 + N // 2) % N", "(i0 + N - N // 2) % N"),
+    shuffled("A", "cyc", "(i0 + 1) % N", "(i0 + N - 1) % N"),
+    shuffled("A", "rev", "N - 1 - i0", "N - 1 - i0"),
+)
 
 
 @dace.program
@@ -81,13 +81,11 @@ def make_inputs(n, seed=0):
 def candidates():
     """The global layout candidates for this kernel: the unshuffled key array plus
     each registered element reordering of ``A`` (Eytzinger stand-in, cyclic, reversal)."""
-    return dict(shuffle_candidates("A", 0, SHUFFLES))
+    return layouts_of("A", [Layout(IDENTITY), *SHUFFLES])
 
 
 def run_closure(inputs, n):
-    """A ``run(sdfg) -> outputs`` closure for the sweep. The shuffle preserves ``A``'s
-    shape (it clones a same-shape transient and reorders internally), so the caller
-    passes the logical key array unchanged -- no descriptor reshape is needed."""
+    """A ``run(sdfg) -> outputs`` closure for the sweep: binds a fresh output each call."""
 
     def run(sdfg):
         out = numpy.zeros(n)

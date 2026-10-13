@@ -18,6 +18,7 @@ import dace
 import numpy
 from dace import nodes
 
+from relayout.frontends.sdfg import CONVERSION
 from relayout.ops import Location
 from relayout.search.layouts import IDENTITY, Layout, lay_out
 from relayout.search.program import Kernel, extract_nest, nest_arguments, rename, written_arrays
@@ -38,8 +39,6 @@ __all__ = [
 #: The relative spread of repeated timings above which a median is contended.
 CONTENDED = 0.10
 
-#: The label prefix of the maps converting an argument into its layout and back.
-CONVERSION_PREFIX = "relayout_"
 
 type Outputs = dict[str, numpy.ndarray]
 type Run = Callable[[dace.SDFG], Outputs]
@@ -94,7 +93,7 @@ def time_call(sdfg: dace.SDFG, run: Run, reps: int, warmup: int) -> Timing:
 
 def is_conversion(state: dace.SDFGState) -> bool:
     entries = [n for n in state.nodes() if isinstance(n, nodes.MapEntry)]
-    return bool(entries) and all(e.map.label.startswith(CONVERSION_PREFIX) for e in entries)
+    return bool(entries) and all(e.map.label.startswith(CONVERSION) for e in entries)
 
 
 def on_gpu(state: dace.SDFGState) -> bool:
