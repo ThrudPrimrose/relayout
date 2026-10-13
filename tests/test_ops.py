@@ -174,6 +174,10 @@ def test_an_inner_digit_blocks_only_by_a_divisor_of_its_extent() -> None:
     ops = [Block("A", "i0", "4", ("a", "b")), Block("A", "b", "3", ("c", "d"))]
     with pytest.raises(ValueError, match="which 3 does not divide"):
         run(ops, [ArraySpec("A", 1)], (), "operations")
+
+
+def test_a_shuffle_takes_root_over_grid_expressions_only() -> None:
+    """The kernels have no integer root of a digit value; over the grid it folds to a constant."""
     with pytest.raises(ValueError, match="root"):
         run([Shuffle("A", ("i0",), ("root(i0, 2)",), ("i0",))], [ArraySpec("A", 1)], (), "operations")
 
@@ -335,6 +339,7 @@ if __name__ == "__main__":
     test_a_zip_of_one_precision_is_a_field_dimension()
     test_a_zip_compares_element_types_not_casts()
     test_an_inner_digit_blocks_only_by_a_divisor_of_its_extent()
+    test_a_shuffle_takes_root_over_grid_expressions_only()
     test_unzip_along_a_dimension_splits_an_array()
     test_a_complex_array_is_one_element_and_a_struct()
     test_a_non_row_major_local_order_is_refused_with_the_permute_that_fixes_it()
