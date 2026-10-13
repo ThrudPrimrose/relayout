@@ -4,6 +4,7 @@ dimension of one array (last: AoS, first: SoA, or a layout places it), reduction
 accumulating, and an array of a small constant extent unzips into one array per index."""
 
 import numpy as np
+import pytest
 
 import dace
 from conftest import variant
@@ -44,6 +45,52 @@ def test_zipped_fields_are_one_array_in_either_order() -> None:
         c = np.zeros((6, 6))
         sdfg(A=a.copy(), B=b.copy(), C=c, N=6)
         np.testing.assert_allclose(c, 0.5 * (a + b))
+
+
+@dace.program
+def mixed(A: dace.float32[N, N], B: dace.float64[N, N], C: dace.float64[N, N]):  # noqa: N803
+    for i, j in dace.map[0:N, 0:N]:
+        C[i, j] = A[i, j] + B[i, j]
+    for i, j in dace.map[0:N, 0:N]:
+        B[i, j] = 2.0 * C[i, j]
+
+
+def test_arrays_of_different_element_types_zip_into_a_struct() -> None:
+    """A (fp32) and B (fp64) become one array of structs; B is read in one state and written in the next."""
+    sdfg = mixed.to_sdfg(simplify=True)
+    variant(sdfg, "struct")
+    zip_arrays(sdfg, ["A", "B"], "Z")
+    sdfg.validate()
+    assert isinstance(sdfg.arrays["Z"].dtype, dace.struct) and [str(s) for s in sdfg.arrays["Z"].shape] == ["N", "N"]
+    rng = np.random.default_rng(9)
+    a, b = rng.random((4, 4)).astype(np.float32), rng.random((4, 4))
+    want_c = a.astype(np.float64) + b
+    c = np.zeros((4, 4))
+    got_b = b.copy()
+    sdfg(A=a.copy(), B=got_b, C=c, N=4)
+    np.testing.assert_allclose(c, want_c)
+    np.testing.assert_allclose(got_b, 2.0 * want_c)
+
+
+def test_a_cast_before_a_zip_makes_a_struct_of_the_cast_types() -> None:
+    pytest.importorskip("fp_arena")
+    request = parse_requests(
+        {
+            "operations": [
+                {"action": "cast", "array": "A", "to": "fp32"},
+                {"action": "zip", "arrays": ["A", "B"], "into": "Z"},
+            ]
+        }
+    )
+    sdfg = madd.to_sdfg(simplify=True)
+    variant(sdfg, "cast_zip")
+    apply_requests(sdfg, request)
+    members = dict(sdfg.arrays["Z"].dtype.fields)
+    assert list(members.values()) == [dace.float32, dace.float64]
+    a, b = np.random.default_rng(10).random((2, 4, 4))
+    c = np.zeros((4, 4))
+    sdfg(A=a.copy(), B=b.copy(), C=c, N=4)
+    np.testing.assert_allclose(c, 0.5 * (a.astype(np.float32) + b), rtol=1e-6)
 
 
 def test_a_reduction_into_zipped_fields_keeps_accumulating() -> None:
@@ -167,6 +214,8 @@ def test_a_data_dependent_write_stores_into_the_part_it_names() -> None:
 
 if __name__ == "__main__":
     test_zipped_fields_are_one_array_in_either_order()
+    test_arrays_of_different_element_types_zip_into_a_struct()
+    test_a_cast_before_a_zip_makes_a_struct_of_the_cast_types()
     test_a_reduction_into_zipped_fields_keeps_accumulating()
     test_unzip_splits_an_array_along_a_small_dimension()
     test_a_request_zips_then_lays_out()

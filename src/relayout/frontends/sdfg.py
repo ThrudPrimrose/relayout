@@ -49,7 +49,7 @@ from dace.transformation.passes.insert_explicit_copies import InsertExplicitCopi
 from dace.transformation.passes.remove_views import RemoveViews
 
 from relayout.layout import IndexMap
-from relayout.ops import ArraySpec, DigitOperation, Precision, Requests, Unzip, Zip
+from relayout.ops import ArraySpec, Cast, DigitOperation, Precision, Requests, Unzip, Zip
 from relayout.rules import einsum_operand, flips_transpose, transpose_axes
 
 __all__ = [
@@ -825,9 +825,14 @@ def zip_arrays(sdfg: dace.SDFG, fields: Sequence[str], into: str, dim: int | Non
     :func:`unzip_array`. Arguments keep their descriptors and are converted in and out (:func:`move_array`)."""
     descs = [array_desc(sdfg, field) for field in fields]
     shapes = {tuple(str(extent) for extent in desc.shape) for desc in descs}
-    types = {desc.dtype for desc in descs}
-    if len(shapes) != 1 or len(types) != 1:
-        raise LayoutError(f"zip of {list(fields)}: the arrays must share one shape and one element type")
+    if len(shapes) != 1:
+        raise LayoutError(f"zip of {list(fields)}: the arrays must share one shape")
+    if len({desc.dtype for desc in descs}) != 1:
+        if dim is not None:
+            raise LayoutError(
+                f"zip of {list(fields)}: arrays of different element types make a struct, which has no dim"
+            )
+        return zip_struct(sdfg, fields, into)
     shape = list(descs[0].shape)
     shape.insert(len(shape) if dim is None else dim, len(fields))
     zipped = copy.deepcopy(descs[0])
@@ -838,6 +843,122 @@ def zip_arrays(sdfg: dace.SDFG, fields: Sequence[str], into: str, dim: int | Non
         move_array(sdfg, field, into, Field(k, dim))
     propagation.propagate_memlets_sdfg(sdfg)
     return into
+
+
+def zip_struct(sdfg: dace.SDFG, fields: Sequence[str], into: str) -> str:
+    """Fuse ``sdfg``'s arrays ``fields`` (one shape, different element types) into the new transient ``into``,
+    an array of the struct ``relayout_zip_<into>`` with one member per field, named after it: a tasklet reads
+    its member of the element, and writes it by reading the element and writing it back (so two members
+    written in one state, which would race on the element, are refused, as is a reduction into one).
+    Arguments keep their descriptors and are converted in and out member by member, one state each."""
+    descs = {field: array_desc(sdfg, field) for field in fields}
+    struct = dace.struct(f"relayout_zip_{into}", **{field: desc.dtype for field, desc in descs.items()})
+    zipped = copy.deepcopy(descs[fields[0]])
+    zipped.dtype, zipped.transient = struct, True
+    shape = list(zipped.shape)
+    zipped.set_shape(shape, strides=packed_strides(shape), total_size=product(shape))
+    sdfg.add_datadesc(into, zipped, find_new_name=False)
+    for edge in sdfg.all_interstate_edges():
+        named = sorted(set(fields) & {str(s) for s in edge.data.read_symbols()})
+        if named:
+            raise LayoutError(f"zip of {list(fields)}: an interstate edge reads {named}; it would read a struct member")
+    for state in sdfg.states():
+        written = sorted({n.data for n in state.data_nodes() if n.data in descs and state.in_degree(n) > 0})
+        if len(written) > 1:
+            raise LayoutError(f"{state.label}: writes {written}, members of one struct element, in one state")
+    io = {field: (is_read(sdfg, field), is_written(sdfg, field), fully_written(sdfg, field)) for field in fields}
+    for state in sdfg.states():
+        for field in fields:
+            copy_through_tasklets(state, field, lambda memlet: True)
+            for node in [n for n in state.data_nodes() if n.data == field]:
+                member_access(state, node, into, field)
+    shape_text = [str(extent) for extent in shape]
+    for field, (read, written, whole) in io.items():
+        if descs[field].transient:
+            sdfg.remove_data(field, validate=False)
+            continue
+        if read or (written and not whole):
+            member_transfer(sdfg.add_state_before(sdfg.start_block, f"zip_in_{field}"), field, into, shape_text, True)
+        if written:
+            sink = next(b for b in sdfg.nodes() if sdfg.out_degree(b) == 0)
+            member_transfer(sdfg.add_state_after(sink, f"zip_out_{field}"), field, into, shape_text, False)
+    propagation.propagate_memlets_sdfg(sdfg)
+    return into
+
+
+def member_access(state: SDFGState, node: nodes.AccessNode, into: str, member: str) -> None:
+    """Every point access of a tasklet (Python or C++) through ``node`` moved to member ``member`` of the
+    struct array ``into``: a read takes the element and picks the member, a write reads the element, sets the
+    member and writes it back."""
+    for edge in list(state.out_edges(node)) + list(state.in_edges(node)):
+        if edge not in state.edges():
+            continue
+        tree = state.memlet_tree(edge)
+        for leaf in list(tree.leaves()):
+            reads = state.memlet_path(leaf)[0].src is node
+            tasklet = leaf.dst if reads else leaf.src
+            conn = leaf.dst_conn if reads else leaf.src_conn
+            if not isinstance(tasklet, nodes.Tasklet) or conn is None:
+                raise LayoutError(f"{state.label}: {leaf.data} reaches a struct member outside a tasklet")
+            if leaf.data.wcr is not None:
+                raise LayoutError(f"{state.label}: a reduction into {node.data!r} would race on its struct element")
+            path = state.memlet_path(leaf)
+            element = dace.Memlet(data=into, subset=copy.deepcopy(leaf.data.subset), dynamic=leaf.data.dynamic)
+            code = tasklet.code.as_string
+            cpp = tasklet.language is dace.Language.CPP
+            ctype = state.sdfg.arrays[into].dtype.fields[member].ctype
+            if reads:
+                tasklet.remove_in_connector(conn)
+                tasklet.add_in_connector(f"{conn}__z")
+                state.add_memlet_path(
+                    state.add_read(into), *[e.dst for e in path[:-1]], tasklet, dst_conn=f"{conn}__z", memlet=element
+                )
+                prefix = f"const {ctype} {conn} = {conn}__z.{member};" if cpp else f"{conn} = {conn}__z.{member}"
+                tasklet.code = CodeBlock(f"{prefix}\n{code}", tasklet.language)
+            else:
+                exits = [e.src for e in path[1:]]
+                tasklet.remove_out_connector(conn)
+                tasklet.add_out_connector(f"{conn}__z")
+                tasklet.add_in_connector(f"{conn}__zin")
+                state.add_memlet_path(tasklet, *exits, state.add_write(into), src_conn=f"{conn}__z", memlet=element)
+                entries = [state.entry_node(exit_) for exit_ in reversed(exits)]
+                state.add_memlet_path(
+                    state.add_read(into), *entries, tasklet, dst_conn=f"{conn}__zin", memlet=copy.deepcopy(element)
+                )
+                if cpp:
+                    store = f"{conn}__z = {conn}__zin;\n{conn}__z.{member} = {conn};"
+                    tasklet.code = CodeBlock(f"{ctype} {conn};\n{code}\n{store}", tasklet.language)
+                else:
+                    store = f"{conn}__z = {conn}__zin\n{conn}__z.{member} = {conn}"
+                    tasklet.code = CodeBlock(f"{code}\n{store}", tasklet.language)
+        for old in list(tree):
+            remove_path_edge(state, old)
+    state.remove_node(node)
+
+
+def member_transfer(state: SDFGState, field: str, into: str, shape: Sequence[str], inward: bool) -> None:
+    """A map over ``shape`` copying argument ``field`` into its member of ``into`` (or back)."""
+    params = [f"__r{d}" for d in range(len(shape))]
+    ranges = {p: f"0:{extent}" for p, extent in zip(params, shape, strict=True)}
+    at = ", ".join(params)
+    if inward:
+        state.add_mapped_tasklet(
+            f"zip_in_{field}",
+            ranges,
+            {"__inp": dace.Memlet(f"{field}[{at}]"), "__zin": dace.Memlet(f"{into}[{at}]")},
+            f"__z = __zin\n__z.{field} = __inp",
+            {"__z": dace.Memlet(f"{into}[{at}]")},
+            external_edges=True,
+        )
+    else:
+        state.add_mapped_tasklet(
+            f"zip_out_{field}",
+            ranges,
+            {"__z": dace.Memlet(f"{into}[{at}]")},
+            f"__out = __z.{field}",
+            {"__out": dace.Memlet(f"{field}[{at}]")},
+            external_edges=True,
+        )
 
 
 def constant(value: object) -> int | None:
@@ -897,6 +1018,8 @@ def unzip_array(sdfg: dace.SDFG, name: str, into: Sequence[str], dim: int) -> li
     selects among the parts (:func:`select_part`). An argument keeps its descriptor, converted into the
     parts and back. A range along the dimension (or a nested SDFG receiving the array) is refused."""
     desc = array_desc(sdfg, name)
+    if isinstance(desc.dtype, dace.struct):
+        raise LayoutError(f"unzip of the struct array {name!r} into its members is not rewritten on an SDFG yet")
     if constant(desc.shape[dim]) != len(into):
         raise LayoutError(
             f"{name!r} has extent {desc.shape[dim]} on dimension {dim}; name one array per index ({len(into)} given)"
@@ -915,7 +1038,7 @@ def unzip_array(sdfg: dace.SDFG, name: str, into: Sequence[str], dim: int) -> li
         sdfg.add_datadesc(part, piece, find_new_name=False)
 
     for state in sdfg.states():
-        copy_through_tasklets(state, name, dim)
+        copy_through_tasklets(state, name, lambda memlet: constant(as_range(memlet.subset).ranges[dim][0]) is None)
         for node in [n for n in state.data_nodes() if n.data == name]:
             split_access(state, node, into, dim)
     for edge in sdfg.all_interstate_edges():
@@ -981,37 +1104,40 @@ def split_access(state: SDFGState, node: nodes.AccessNode, into: Sequence[str], 
     state.remove_node(node)
 
 
-def copy_through_tasklets(state: SDFGState, name: str, dim: int) -> None:
-    """Each copy between ``name`` and another container whose index on ``dim`` is data-dependent goes through
-    a tasklet ``__out = __inp``, which :func:`select_part` can then rewrite."""
+def copy_through_tasklets(state: SDFGState, name: str, needs: Callable[[dace.Memlet], bool]) -> None:
+    """Each copy between ``name`` and another container (its memlet named after either end) whose memlet
+    ``needs`` it goes through a tasklet ``__out = __inp``, which a rewrite of tasklet accesses
+    (:func:`select_part`, :func:`member_access`) can then rewrite."""
     for edge in list(state.edges()):
-        memlet = edge.data
-        if memlet.data != name or not isinstance(edge.src, nodes.AccessNode | nodes.EntryNode):
+        if edge not in state.edges() or edge.data.is_empty():
+            continue
+        if not isinstance(edge.src, nodes.AccessNode | nodes.EntryNode):
             continue
         if not isinstance(edge.dst, nodes.AccessNode | nodes.ExitNode):
             continue
-        reads = isinstance(edge.dst, nodes.AccessNode) and edge.dst.data != name
-        other = edge.dst if reads else edge.src
-        if not isinstance(other, nodes.AccessNode) or constant(as_range(memlet.subset).ranges[dim][0]) is not None:
+        path = state.memlet_path(edge)
+        source, target = path[0].src, path[-1].dst
+        if not isinstance(source, nodes.AccessNode) or not isinstance(target, nodes.AccessNode):
             continue
-        tasklet = state.add_tasklet(f"unzip_copy_{name}", {"__inp"}, {"__out"}, "__out = __inp")
-        own = dace.Memlet(data=name, subset=copy.deepcopy(memlet.subset), wcr=memlet.wcr)
-        theirs = (
-            subsets.Range.from_array(state.sdfg.arrays[other.data])
-            if memlet.other_subset is None
-            else memlet.other_subset
+        if name not in (source.data, target.data) or source.data == target.data:
+            continue
+        reads = source.data == name
+        other = target if reads else source
+        memlet = edge.data
+        own_subset, other_subset = (
+            (memlet.subset, memlet.other_subset) if memlet.data == name else (memlet.other_subset, memlet.subset)
         )
+        own_subset = own_subset or subsets.Range.from_array(state.sdfg.arrays[name])
+        other_subset = other_subset or subsets.Range.from_array(state.sdfg.arrays[other.data])
+        own = dace.Memlet(data=name, subset=copy.deepcopy(own_subset), wcr=memlet.wcr)
+        if not needs(own):
+            continue
+        theirs = dace.Memlet(data=other.data, subset=copy.deepcopy(other_subset))
+        tasklet = state.add_tasklet(f"copy_{name}", {"__inp"}, {"__out"}, "__out = __inp")
         state.remove_edge(edge)
-        if reads:
-            state.add_edge(edge.src, edge.src_conn, tasklet, "__inp", own)
-            state.add_edge(
-                tasklet, "__out", edge.dst, edge.dst_conn, dace.Memlet(data=other.data, subset=copy.deepcopy(theirs))
-            )
-        else:
-            state.add_edge(
-                edge.src, edge.src_conn, tasklet, "__inp", dace.Memlet(data=other.data, subset=copy.deepcopy(theirs))
-            )
-            state.add_edge(tasklet, "__out", edge.dst, edge.dst_conn, own)
+        inner, outer = (own, theirs) if reads else (theirs, own)
+        state.add_edge(edge.src, edge.src_conn, tasklet, "__inp", inner)
+        state.add_edge(tasklet, "__out", edge.dst, edge.dst_conn, outer)
 
 
 def select_part(
@@ -1115,26 +1241,28 @@ def cast_array(sdfg: dace.SDFG, name: str, precision: Precision) -> str:
 
 
 def apply_requests(sdfg: dace.SDFG, requests: Requests) -> dict[str, str]:
-    """Carry ``requests``' operations out on ``sdfg`` (single node): ``zip`` / ``unzip`` regroup arrays in
-    program order (:func:`zip_arrays`, :func:`unzip_array`), then every array a digit operation touched is
-    laid out as the operations leave it (:func:`relayout_array`); returns each laid-out array's working
-    name. A ``cast`` changes the array's element type before its layout (:func:`cast_array`, FP-Arena); a
-    ``zip`` of different element types (a struct) is not yet rewritten."""
+    """Carry ``requests``' operations out on ``sdfg`` (single node): ``cast`` (:func:`cast_array`, FP-Arena),
+    ``zip`` and ``unzip`` (:func:`zip_arrays`, :func:`unzip_array`) in program order, so a cast before a zip
+    makes a struct of the cast types; then every array a digit operation touched is laid out as the
+    operations leave it (:func:`relayout_array`). Returns the name each requested array is now worked on."""
 
     def arrays() -> dict[str, data.Array]:
         return {n: d for n, d in sdfg.arrays.items() if isinstance(d, data.Array) and not isinstance(d, data.View)}
 
     state = requests.run([ArraySpec(name, len(desc.shape)) for name, desc in arrays().items()])
+    working: dict[str, str] = {}
     stacked: dict[str, int] = {}  # a zipped array's field dimension, which its unzip splits along by default
     for op in requests.operations:
-        if isinstance(op, Zip):
-            zip_arrays(sdfg, op.arrays, op.into, op.dim)
-            stacked[op.into] = len(sdfg.arrays[op.into].shape) - 1 if op.dim is None else op.dim
+        if isinstance(op, Cast):
+            working[op.array] = cast_array(sdfg, working.get(op.array, op.array), op.to)
+        elif isinstance(op, Zip):
+            zip_arrays(sdfg, [working.pop(name, name) for name in op.arrays], op.into, op.dim)
+            if not isinstance(sdfg.arrays[op.into].dtype, dace.struct):
+                stacked[op.into] = len(sdfg.arrays[op.into].shape) - 1 if op.dim is None else op.dim
         elif isinstance(op, Unzip):
             last = len(sdfg.arrays[op.array].shape) - 1
             dim = stacked.get(op.array, last) if op.dim is None else op.dim
             unzip_array(sdfg, op.array, op.into, dim)
-    working = {name: cast_array(sdfg, name, precision) for name, precision in sorted(requests.precisions().items())}
     laid_out = {op.array for op in requests.operations if isinstance(op, DigitOperation)}
     for name in sorted(laid_out):
         target = working.get(name, name)
