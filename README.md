@@ -49,7 +49,7 @@ lower(distributed.run([ArraySpec(name, 5) for name in ...], ranks=4))   # each a
 | `relayout.layout` | `IndexMap`: one array's layout as index arithmetic, logical index to physical and back; the model everything below reads |
 | `relayout.convert` | conversion kernels: one gather that casts, lays out and changes sparse formats in a single pass, as C with OpenMP and as a CUDA / HIP kernel; numpy forms for tests |
 | `relayout.sparse` | sparse formats (csr, csc, coo, bsr, dia, ell) planned once from a canonical CSR; values move through the gather |
-| `relayout.rules` | how a library call absorbs a permuted operand: transpose, einsum, contraction / reduction axes, BLAS transpose flags |
+| `relayout.rules` | how a library call absorbs a permuted operand: transpose, einsum, contraction / reduction axes, BLAS transpose flags (gemm, matmul, syrk) and triangles (syrk, symm) |
 | `relayout.frontends.python` | a numpy / mpi4py program rewritten for laid-out arrays (element accesses, logical views, packed MPI buffers) |
 | `relayout.frontends.sdfg` | an SDFG rewritten for laid-out arrays: one rewrite for every layout, library nodes by their rules, MPI library nodes through packed buffers; `zip` / `unzip` along a dimension (data-dependent indices select their part), and `cast` through FP-Arena (extra `fparena`) |
 | `relayout.frontends.schedule` | the schedule after a layout: maps tiled to the blocks their arrays are cut into, tiles over flat arrays merged back, map nests ordered by stride |

@@ -2,10 +2,15 @@
 """The SDFG frontend: a program whose arrays are laid out (arguments converted in and out, transients
 in place) computes what it computed before."""
 
+import copy
+
 import dace
 import numpy as np
 import pytest
 from conftest import variant
+from dace import nodes
+from dace.libraries.blas.nodes.symm import Symm
+from dace.libraries.blas.nodes.syrk import Syrk
 
 from relayout.frontends.sdfg import LayoutError, apply_requests, relayout_array
 from relayout.layout import IndexMap
@@ -168,6 +173,65 @@ def test_a_cast_changes_the_element_type_before_the_layout() -> None:
     np.testing.assert_allclose(b, reference(a.astype(np.float32).astype(np.float64)), rtol=1e-6)
 
 
+def library_sdfg(name: str, node: nodes.LibraryNode, operands: dict[str, tuple[str, tuple[int, ...]]]) -> dace.SDFG:
+    """One library node wired to arrays: ``{connector: (array, shape)}``, an output connector last."""
+    sdfg = dace.SDFG(name)
+    state = sdfg.add_state()
+    state.add_node(node)
+    for connector, (array, shape) in operands.items():
+        if array not in sdfg.arrays:
+            sdfg.add_array(array, shape, dace.float64)
+        memlet = dace.Memlet.from_array(array, sdfg.arrays[array])
+        if connector in node.in_connectors:
+            state.add_edge(state.add_read(array), None, node, connector, memlet)
+        if connector in node.out_connectors:
+            state.add_edge(node, connector, state.add_write(array), None, copy.deepcopy(memlet))
+    return sdfg
+
+
+def transposed(array: str, shape: tuple[int, ...]) -> IndexMap:
+    return run([Permute("A", ("i1", "i0"))], [ArraySpec("A", 2)], (), "ops").layout("A", [str(n) for n in shape])
+
+
+def test_syrk_symm_and_reduce_absorb_a_transposed_operand() -> None:
+    """Syrk: A and C transposed (trans and uplo flip); Symm: A transposed (uplo flips); Reduce over a
+    transposed input (its axes follow)."""
+    rng = np.random.default_rng(8)
+    a = rng.standard_normal((4, 3))
+    syrk = library_sdfg("laid_syrk", Syrk("syrk", uplo="L", trans="N"), {"_a": ("A", (4, 3)), "_c": ("C", (4, 4))})
+    relayout_array(syrk, "A", transposed("A", (4, 3)))
+    relayout_array(syrk, "C", transposed("C", (4, 4)))
+    syrk.expand_library_nodes()
+    c = np.zeros((4, 4))
+    syrk(A=a.copy(), C=c)
+    np.testing.assert_allclose(np.tril(c), np.tril(a @ a.T))
+
+    s = rng.standard_normal((4, 4))
+    s = s + s.T
+    b = rng.standard_normal((4, 2))
+    symm = library_sdfg(
+        "laid_symm", Symm("symm", side="L", uplo="L"), {"_a": ("A", (4, 4)), "_b": ("B", (4, 2)), "_c": ("C", (4, 2))}
+    )
+    relayout_array(symm, "A", transposed("A", (4, 4)))
+    symm.expand_library_nodes()
+    c = np.zeros((4, 2))
+    symm(A=np.tril(s) + np.triu(rng.standard_normal((4, 4)), 1), B=b, C=c)
+    np.testing.assert_allclose(c, s @ b)
+
+    sdfg = dace.SDFG("laid_reduce")
+    sdfg.add_array("A", (4, 3), dace.float64)
+    sdfg.add_array("R", (3,), dace.float64)
+    state = sdfg.add_state()
+    reduce = state.add_reduce("lambda x, y: x + y", axes=[0], identity=0)
+    state.add_edge(state.add_read("A"), None, reduce, None, dace.Memlet("A[0:4, 0:3]"))
+    state.add_edge(reduce, None, state.add_write("R"), None, dace.Memlet("R[0:3]"))
+    relayout_array(sdfg, "A", transposed("A", (4, 3)))
+    assert reduce.axes == [1]
+    r = np.zeros(3)
+    sdfg(A=a.copy(), R=r)
+    np.testing.assert_allclose(r, a.sum(axis=0))
+
+
 def test_a_library_node_without_a_rule_is_refused() -> None:
     @dace.program
     def product(A: dace.float64[N, N], x: dace.float64[N], y: dace.float64[N]):
@@ -197,6 +261,7 @@ def test_an_argument_written_in_part_keeps_the_cells_the_program_leaves() -> Non
 
 
 if __name__ == "__main__":
+    test_syrk_symm_and_reduce_absorb_a_transposed_operand()
     test_a_cast_changes_the_element_type_before_the_layout()
     test_an_argument_written_in_part_keeps_the_cells_the_program_leaves()
     test_laid_out_arguments_and_transients_compute_the_same(

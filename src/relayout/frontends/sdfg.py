@@ -28,10 +28,13 @@ from dace import data, nodes, subsets, symbolic
 from dace.libraries.blas.nodes.einsum import Einsum
 from dace.libraries.blas.nodes.gemm import Gemm
 from dace.libraries.blas.nodes.matmul import MatMul
+from dace.libraries.blas.nodes.symm import Symm
+from dace.libraries.blas.nodes.syrk import Syrk
 from dace.libraries.linalg import TensorDot, TensorTranspose
 from dace.libraries.mpi.nodes import Irecv, Wait, Waitall
 from dace.libraries.mpi.nodes.node import MPINode
 from dace.libraries.standard.nodes.copy import CopyLibraryNode
+from dace.libraries.standard.nodes.reduce import Reduce
 from dace.properties import CodeBlock
 from dace.sdfg import propagation
 from dace.sdfg.graph import MultiConnectorEdge
@@ -382,7 +385,7 @@ def access_name(node: nodes.Node) -> str | None:
     return node.data if isinstance(node, nodes.AccessNode) else None
 
 
-def blas_rule(state: SDFGState, node: Gemm | MatMul, connector: str, perm: tuple[int, ...]) -> None:
+def blas_rule(state: SDFGState, node: Gemm | MatMul, connector: str, perm: tuple[int, ...], output: bool) -> None:
     """A 2-D BLAS operand stored transposed toggles its transpose flag (``transA`` / ``transB``); an
     output stored transposed swaps the operands, ``C^T = op(B)^T op(A)^T`` (its ``_cin``, the same
     array, follows)."""
@@ -399,7 +402,7 @@ def blas_rule(state: SDFGState, node: Gemm | MatMul, connector: str, perm: tuple
         node.transA, node.transB = not node.transB, not node.transA
 
 
-def einsum_rule(state: SDFGState, node: Einsum, connector: str, perm: tuple[int, ...]) -> None:
+def einsum_rule(state: SDFGState, node: Einsum, connector: str, perm: tuple[int, ...], output: bool) -> None:
     """An einsum operand (or its output) stored permuted names its subscripts in stored order."""
     inputs, _, output = node.einsum_str.partition("->")
     groups = [group.strip() for group in inputs.split(",")]
@@ -411,7 +414,9 @@ def einsum_rule(state: SDFGState, node: Einsum, connector: str, perm: tuple[int,
     node.einsum_str = f"{','.join(groups)}->{output.strip()}"
 
 
-def tensor_transpose_rule(state: SDFGState, node: TensorTranspose, connector: str, perm: tuple[int, ...]) -> None:
+def tensor_transpose_rule(
+    state: SDFGState, node: TensorTranspose, connector: str, perm: tuple[int, ...], output: bool
+) -> None:
     """``out = transpose(inp, axes)`` with ``inp`` (or ``out``) stored permuted."""
     axes = list(node.axes)
     node.axes = list(transpose_axes(axes, perm)) if connector == "_inp_tensor" else [axes[k] for k in perm]
@@ -422,7 +427,7 @@ def operand_rank(state: SDFGState, node: nodes.LibraryNode, connector: str) -> i
     return len(as_range(edge.data.subset))
 
 
-def tensor_dot_rule(state: SDFGState, node: TensorDot, connector: str, perm: tuple[int, ...]) -> None:
+def tensor_dot_rule(state: SDFGState, node: TensorDot, connector: str, perm: tuple[int, ...], output: bool) -> None:
     """A contraction with an operand (or its output) stored permuted: one letter per operand axis,
     shared by each contracted pair; the stored order renames the contracted axes, and ``permutation``
     keeps the output's axes where they were."""
@@ -453,12 +458,45 @@ def tensor_dot_rule(state: SDFGState, node: TensorDot, connector: str, perm: tup
 
 
 #: Library node type -> how it takes an operand (by connector) stored permuted.
-LIBRARY_RULES: dict[type, Callable[[SDFGState, Any, str, tuple[int, ...]], None]] = {
+def syrk_rule(state: SDFGState, node: Syrk, connector: str, perm: tuple[int, ...], output: bool) -> None:
+    """``C = alpha op(A) op(A)^T + beta C``: ``A`` stored transposed toggles ``trans``; ``C`` stored transposed
+    keeps the same symmetric update in the other triangle (``uplo``), flipped once, on its output edge."""
+    if not flips_transpose(perm):
+        return
+    if connector == "_a":
+        node.trans = "N" if node.trans == "T" else "T"
+    elif connector == "_c" and output:
+        node.uplo = "U" if node.uplo == "L" else "L"
+
+
+def symm_rule(state: SDFGState, node: Symm, connector: str, perm: tuple[int, ...], output: bool) -> None:
+    """``C = alpha A B + beta C`` with ``A`` symmetric: ``A`` stored transposed is the same matrix with its
+    other triangle referenced (``uplo``); ``B`` or ``C`` stored transposed has no flag and is refused."""
+    if not flips_transpose(perm):
+        return
+    if connector != "_a":
+        raise LayoutError(f"{state.label}: Symm {node.label!r} takes {connector!r} only as it is; lay out A")
+    node.uplo = "U" if node.uplo == "L" else "L"
+
+
+def reduce_rule(state: SDFGState, node: Reduce, connector: str, perm: tuple[int, ...], output: bool) -> None:
+    """A reduction of an input stored permuted reduces the stored positions of its axes, as long as the
+    axes it keeps stay in their order (the output's); an output stored permuted is refused."""
+    kept_order = [axis for axis in perm if node.axes is not None and axis not in node.axes]
+    if output or node.axes is None or kept_order != sorted(kept_order):
+        raise LayoutError(f"{state.label}: reduce {node.label!r} cannot keep its output order under this layout")
+    node.axes = sorted(perm.index(axis) for axis in node.axes)
+
+
+LIBRARY_RULES: dict[type, Callable[[SDFGState, Any, str, tuple[int, ...], bool], None]] = {
     Gemm: blas_rule,
     MatMul: blas_rule,
     Einsum: einsum_rule,
     TensorTranspose: tensor_transpose_rule,
     TensorDot: tensor_dot_rule,
+    Syrk: syrk_rule,
+    Symm: symm_rule,
+    Reduce: reduce_rule,
 }
 
 
@@ -474,7 +512,7 @@ def library_rule(state: SDFGState, edge: MultiConnectorEdge[dace.Memlet], placem
                 f"{state.label}: library node {node.label!r} ({type(node).__name__}) has no rule for this layout"
             )
         if perm != tuple(range(len(perm))):
-            rule(state, node, connector, perm)
+            rule(state, node, connector, perm, node is edge.src)
 
 
 def expand_copy(state: SDFGState, node: CopyLibraryNode) -> None:
