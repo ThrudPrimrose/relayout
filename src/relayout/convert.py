@@ -28,6 +28,8 @@ __all__ = [
     "Conversion",
     "Element",
     "Gather",
+    "Group",
+    "Member",
     "c_expr",
     "compile_host",
     "device_source",
@@ -200,11 +202,14 @@ def host_function(conversion: Conversion, inward: bool) -> str:
     )
 
 
-def host_source(conversions: Sequence[Conversion], gathers: Sequence["Gather"] = ()) -> str:
-    """A C translation unit exporting ``relayout_in_<name>`` / ``relayout_out_<name>`` per conversion and
-    ``relayout_gather_<name>`` / ``relayout_scatter_<name>`` per gather."""
+def host_source(
+    conversions: Sequence[Conversion], gathers: Sequence["Gather"] = (), groups: Sequence["Group"] = ()
+) -> str:
+    """A C translation unit exporting ``relayout_in_<name>`` / ``relayout_out_<name>`` per conversion,
+    ``relayout_gather_<name>`` / ``relayout_scatter_<name>`` per gather and ``relayout_zip_<name>`` /
+    ``relayout_unzip_<name>`` per group."""
     dense = "".join(host_function(c, inward) for c in conversions for inward in (True, False))
-    return fp_header() + dense + "".join(g.host() for g in gathers)
+    return fp_header() + dense + "".join(g.host() for g in gathers) + "".join(g.host() for g in groups)
 
 
 def grid_stride(var: str, bound: str) -> str:
@@ -232,11 +237,13 @@ def device_function(conversion: Conversion, inward: bool) -> str:
     )
 
 
-def device_source(conversions: Sequence[Conversion], gathers: Sequence["Gather"] = ()) -> str:
-    """CUDA / HIP source with one ``__global__`` kernel per conversion or gather and direction (grid-stride
-    loops), named as in :func:`host_source`."""
+def device_source(
+    conversions: Sequence[Conversion], gathers: Sequence["Gather"] = (), groups: Sequence["Group"] = ()
+) -> str:
+    """CUDA / HIP source with one ``__global__`` kernel per conversion, gather or group and direction
+    (grid-stride loops), named as in :func:`host_source`."""
     dense = "".join(device_function(c, inward) for c in conversions for inward in (True, False))
-    return fp_header() + dense + "".join(g.device() for g in gathers)
+    return fp_header() + dense + "".join(g.device() for g in gathers) + "".join(g.device() for g in groups)
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,6 +282,112 @@ class Gather:
             f"const int64_t *__restrict__ table, {logical.c_type} *__restrict__ dst, int64_t n) {{\n"
             f"    {loop} if (table[k] >= 0) dst[table[k]] = {cast(stored, logical, 'src[k]')};\n}}\n"
         )
+
+
+@dataclass(frozen=True, slots=True)
+class Member:
+    """One part of a :class:`Group`: its array ``name`` laid out by ``layout`` (over the parts' logical
+    shape) at element type ``logical``, and its element type ``stored`` inside the whole, as member
+    ``field`` of a struct whole."""
+
+    name: str
+    layout: IndexMap
+    logical: str
+    stored: str
+    field: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class Group:
+    """Part arrays of one logical shape and the one array ``name`` that zips them, laid out by ``layout``:
+    stacked along logical dimension ``dim`` of the whole (the parts' shape with their count inserted there),
+    or, ``dim`` None, one struct of C type ``struct`` per element, part ``k`` its member ``parts[k].field``
+    (a complex whole is the struct ``(re, im)``). ``relayout_zip_<name>`` fills the whole from the parts and
+    ``relayout_unzip_<name>`` the parts from the whole, each casting between the parts' element types; both
+    walk the parts' logical index space, so a laid-out buffer's dead cells keep what they held."""
+
+    name: str
+    layout: IndexMap
+    parts: tuple[Member, ...]
+    dim: int | None = None
+    struct: str = ""
+
+    def symbols(self) -> tuple[str, ...]:
+        """The names the parts' logical shape reads, the kernels' ``int64_t`` arguments in this order."""
+        return Conversion(self.name, self.parts[0].layout, "float64", "float64").symbols()
+
+    def whole_type(self) -> str:
+        return self.struct or ELEMENTS[self.parts[0].stored].c_type
+
+    def typedef(self) -> str:
+        """The C struct of a struct whole that is no builtin type (complex is the runtime header's)."""
+        if not self.struct or self.struct.startswith("relayout_c"):
+            return ""
+        members = " ".join(f"{ELEMENTS[part.stored].c_type} {part.field};" for part in self.parts)
+        return f"typedef struct {{ {members} }} {self.struct};\n"
+
+    def cells(self, index: Sequence[str]) -> list[tuple[Member, str, str]]:
+        """Per part at logical ``index``: the part, its buffer position and the whole's (with its member)."""
+        out = []
+        for k, part in enumerate(self.parts):
+            at = c_expr(linear(part.layout.physical(index), part.layout.extents()))
+            whole_index = list(index) if self.dim is None else [*index[: self.dim], str(k), *index[self.dim :]]
+            whole = c_expr(linear(self.layout.physical(whole_index), self.layout.extents()))
+            out.append((part, at, f"whole[{whole}]" + (f".{part.field}" if self.dim is None else "")))
+        return out
+
+    def bodies(self, index: Sequence[str]) -> tuple[str, str]:
+        """The zip and the unzip statements at logical ``index``."""
+        zips, unzips = [], []
+        for k, (part, at, whole) in enumerate(self.cells(index)):
+            logical, stored = ELEMENTS[part.logical], ELEMENTS[part.stored]
+            zips.append(f"{whole} = {cast(logical, stored, f'p{k}[{at}]')};")
+            unzips.append(f"p{k}[{at}] = {cast(stored, logical, whole)};")
+        return " ".join(zips), " ".join(unzips)
+
+    def signatures(self, qualifier: str) -> tuple[str, str]:
+        parts_in = ", ".join(f"const {ELEMENTS[p.logical].c_type} *{qualifier} p{k}" for k, p in enumerate(self.parts))
+        parts_out = ", ".join(f"{ELEMENTS[p.logical].c_type} *{qualifier} p{k}" for k, p in enumerate(self.parts))
+        extents = "".join(f", int64_t {symbol}" for symbol in self.symbols())
+        whole = self.whole_type()
+        return (
+            f"void relayout_zip_{self.name}({parts_in}, {whole} *{qualifier} whole{extents})",
+            f"void relayout_unzip_{self.name}(const {whole} *{qualifier} whole, {parts_out}{extents})",
+        )
+
+    def host(self) -> str:
+        shape = [c_expr(extent) for extent in self.parts[0].layout.shape]
+        index = [f"i{d}" for d in range(len(shape))]
+        loops = "".join(
+            f"{'    ' * (d + 1)}for (int64_t {i} = 0; {i} < {n}; ++{i})\n"
+            for d, (i, n) in enumerate(zip(index, shape, strict=True))
+        )
+        collapse = f" collapse({len(shape)})" if len(shape) > 1 else ""
+        body = "    " * (len(shape) + 1)
+        out = []
+        for signature, statement in zip(self.signatures("restrict"), self.bodies(index), strict=True):
+            out.append(
+                f"{signature} {{\n#pragma omp parallel for{collapse} schedule(static)\n{loops}{body}{{ {statement} }}\n}}\n"
+            )
+        return self.typedef() + "".join(out)
+
+    def device(self) -> str:
+        shape = [c_expr(extent) for extent in self.parts[0].layout.shape]
+        index = [f"i{d}" for d in range(len(shape))]
+        decompose, rest = [], "t"
+        for k in reversed(range(len(shape))):
+            decompose.append(f"        const int64_t {index[k]} = {rest} % {shape[k]};\n")
+            if k:
+                decompose.append(f"        const int64_t t{k} = {rest} / {shape[k]};\n")
+                rest = f"t{k}"
+        total = " * ".join(shape) or "1LL"
+        out = []
+        for signature, statement in zip(self.signatures("__restrict__"), self.bodies(index), strict=True):
+            out.append(
+                f'extern "C" __global__ {signature} {{\n    const int64_t total = {total};\n'
+                f"    {grid_stride('t', 'total')} {{\n{''.join(decompose)}        {statement}\n    }}\n}}\n"
+            )
+        return self.typedef() + "".join(out)
 
 
 def compile_host(source: str, out: pathlib.Path, compiler: str = "cc", flags: Sequence[str] = ("-O2",)) -> pathlib.Path:

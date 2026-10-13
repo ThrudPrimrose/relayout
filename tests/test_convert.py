@@ -13,7 +13,7 @@ import ml_dtypes
 import numpy as np
 import pytest
 
-from relayout.convert import Conversion, compile_host, device_source, host_source
+from relayout.convert import Conversion, Group, Member, compile_host, device_source, host_source
 from relayout.layout import IndexMap
 from relayout.ops import ArraySpec, Block, Pad, Permute, eval_index, run
 
@@ -113,6 +113,55 @@ def test_complex_arrays_cast_their_parts(tmp_path: pathlib.Path) -> None:
     np.testing.assert_array_equal(stored, z.T.astype(np.complex64))
 
 
+def group_call(lib: ctypes.CDLL, symbol: str, buffers: list[np.ndarray], group: Group, **sizes: int) -> None:
+    fn = getattr(lib, symbol)
+    fn(*(ctypes.c_void_p(b.ctypes.data) for b in buffers), *(ctypes.c_int64(sizes[n]) for n in group.symbols()))
+
+
+def test_a_group_zips_and_unzips_stacked_struct_and_complex(tmp_path: pathlib.Path) -> None:
+    """Two parts stacked first (and the whole transposed), a float32 and a float64 part in one struct, and a
+    complex array unzipped into its real and imaginary parts: zip then unzip gives the parts back."""
+    rng = np.random.default_rng(11)
+    flat = IndexMap.identity(["d0", "d1"])
+    x, y = rng.random((3, 5)), rng.random((3, 5))
+    whole = run([Permute("A", ("i2", "i1", "i0"))], [ArraySpec("A", 3)], (), "ops").layout("A", ["2", "d0", "d1"])
+    stacked = Group("s", whole, (Member("x", flat, "float64", "float64"), Member("y", flat, "float64", "float64")), 0)
+    a, b = rng.random((3, 5)).astype(np.float32), rng.random((3, 5))
+    struct = Group(
+        "t",
+        flat,
+        (Member("a", flat, "float32", "float32", "a"), Member("b", flat, "float64", "float64", "b")),
+        None,
+        "relayout_struct_t",
+    )
+    z = rng.random((3, 5)) + 1j * rng.random((3, 5))
+    parts = (Member("re", flat, "float64", "float64", "re"), Member("im", flat, "float64", "float64", "im"))
+    complex_group = Group("c", flat, parts, None, "relayout_c128")
+    lib = ctypes.CDLL(
+        str(
+            compile_host(
+                host_source([], groups=[stacked, struct, complex_group]),
+                tmp_path / "groups.so",
+                os.environ.get("CC", "cc"),
+            )
+        )
+    )
+    s = np.zeros((5, 3, 2))
+    group_call(lib, "relayout_zip_s", [x, y, s], stacked, d0=3, d1=5)
+    np.testing.assert_array_equal(s, np.stack([x, y]).transpose(2, 1, 0))
+    back = [np.zeros((3, 5)), np.zeros((3, 5))]
+    group_call(lib, "relayout_unzip_s", [s, *back], stacked, d0=3, d1=5)
+    np.testing.assert_array_equal(back[0], x)
+    np.testing.assert_array_equal(back[1], y)
+    t = np.zeros((3, 5), np.dtype([("a", np.float32), ("b", np.float64)], align=True))
+    group_call(lib, "relayout_zip_t", [a, b, t], struct, d0=3, d1=5)
+    np.testing.assert_array_equal(t["a"], a)
+    np.testing.assert_array_equal(t["b"], b)
+    re, im = np.zeros((3, 5)), np.zeros((3, 5))
+    group_call(lib, "relayout_unzip_c", [z, re, im], complex_group, d0=3, d1=5)
+    np.testing.assert_array_equal(re + 1j * im, z)
+
+
 def test_the_device_kernels_match_the_host(tmp_path: pathlib.Path) -> None:
     cp = pytest.importorskip("cupy")
     if cp.cuda.runtime.getDeviceCount() == 0:
@@ -128,6 +177,7 @@ def test_the_device_kernels_match_the_host(tmp_path: pathlib.Path) -> None:
 
 
 if __name__ == "__main__":
+    test_a_group_zips_and_unzips_stacked_struct_and_complex(pathlib.Path(tempfile.mkdtemp()))
     for source in ("float64", "float32"):
         with tempfile.TemporaryDirectory() as tmp:
             test_every_narrow_format_rounds_like_numpy(source, pathlib.Path(tmp))
