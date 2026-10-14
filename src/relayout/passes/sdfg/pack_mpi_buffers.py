@@ -16,7 +16,7 @@ from dace.libraries.standard.nodes.copy import CopyLibraryNode
 from dace.sdfg.graph import MultiConnectorEdge
 from dace.sdfg.state import SDFGState
 
-from relayout.layout import IndexMap
+from relayout.layout import IndexMap, rows_outermost
 from relayout.passes.sdfg.common import LayoutError, as_range, expr
 from relayout.passes.sdfg.placement import Laid, Placement, physical_subset, trailing_axes
 
@@ -55,15 +55,6 @@ def run_subset(logical: subsets.Subset, layout: IndexMap) -> subsets.Range:
     return subsets.Range(
         [(0, expr(extent) - 1, 1) if k in spanned else fixed[k] for k, extent in enumerate(layout.extents())]
     )
-
-
-def rows_outermost(layout: IndexMap) -> bool:
-    """Whether the laid-out buffer keeps logical dimension 0 as its outermost, uncut axis: a collective that
-    deals the buffer out in equal rank chunks then deals out whole logical rows."""
-    first = layout.axes[0]
-    renumbered = {name for renumber in layout.renumbers for name in renumber.axes}
-    alone = sum(axis.dim == 0 for axis in layout.axes) == 1
-    return first.dim == 0 and first.stride == 1 and not first.pad and first.name not in renumbered and alone
 
 
 def pack_mpi_buffers(buffers: Sequence[MpiBuffer]) -> None:

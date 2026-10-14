@@ -1,7 +1,12 @@
 # Copyright 2026 ETH Zurich and the relayout authors.
 """Shared test helpers."""
 
+import ast
 import importlib.util
+import inspect
+import textwrap
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -18,6 +23,25 @@ def mpi_or_skip() -> Any:  # noqa: ANN401  # the mpi4py.MPI module
     except RuntimeError as exc:
         pytest.skip(f"mpi4py finds no MPI library: {str(exc).splitlines()[0]}")
     return MPI
+
+
+@dataclass(frozen=True, slots=True)
+class Rewritten:
+    """A Python kernel after a pass: the compiled function and its source."""
+
+    function: Callable[..., Any]
+    source: str
+
+
+def rewritten(function: Callable[..., Any], transform: Callable[[ast.Module], object]) -> Rewritten:
+    """``function`` parsed from its source, ``transform`` applied to the module, compiled in ``function``'s module
+    namespace (the rewritten function sees its module, as the original does)."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+    transform(tree)
+    source = ast.unparse(ast.fix_missing_locations(tree))
+    namespace = dict(function.__globals__)
+    exec(compile(source, f"<rewritten {function.__name__}>", "exec"), namespace)  # noqa: S102  # the test's own kernel
+    return Rewritten(namespace[function.__name__], source)
 
 
 def flang_missing() -> bool:

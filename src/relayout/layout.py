@@ -28,6 +28,7 @@ __all__ = [
     "linear",
     "mod",
     "mul",
+    "rows_outermost",
     "substitute",
 ]
 
@@ -239,3 +240,12 @@ def divides(axes: Sequence[Axis], extent: str) -> bool:
         return False
     block = math.prod(axis.live for axis in axes if axis.live is not None)
     return int(extent) % block == 0
+
+
+def rows_outermost(layout: IndexMap) -> bool:
+    """Whether the laid-out buffer keeps logical dimension 0 as its outermost, uncut axis: a collective that
+    deals the buffer out in equal rank chunks then deals out whole logical rows."""
+    first = layout.axes[0]
+    renumbered = {name for renumber in layout.renumbers for name in renumber.axes}
+    alone = sum(axis.dim == 0 for axis in layout.axes) == 1
+    return first.dim == 0 and first.stride == 1 and not first.pad and first.name not in renumbered and alone
