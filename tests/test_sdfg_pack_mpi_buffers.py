@@ -1,6 +1,6 @@
 # Copyright 2026 ETH Zurich and the relayout authors.
 """MPI library nodes on laid-out buffers: the transfer moves a packed copy in the logical order, so the
-wire order is the original program's. Run under ``mpirun -n 2 pytest tests/test_frontend_sdfg_mpi.py``;
+wire order is the original program's. Run under ``mpirun -n 2 pytest tests/test_sdfg_pack_mpi_buffers.py``;
 the structure check runs anywhere."""
 
 import numpy as np
@@ -9,7 +9,8 @@ import pytest
 import dace
 from tests.conftest import LAYOUT_CASES, mpi_or_skip, variant
 from dace import nodes
-from relayout.frontends.sdfg import pack_mpi_buffers, relayout_array
+from relayout.passes.sdfg.pack_mpi_buffers import pack_mpi_buffers
+from relayout.passes.sdfg.relayout_array import relayout_array
 from dace.libraries.standard.nodes.copy import CopyLibraryNode
 from relayout.ops import ArraySpec, Block, Pad, Permute, Shuffle, run
 

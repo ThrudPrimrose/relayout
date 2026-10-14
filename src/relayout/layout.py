@@ -1,5 +1,5 @@
 # Copyright 2026 ETH Zurich and the relayout authors.
-"""One array's layout as index arithmetic, the model every frontend and kernel generator reads.
+"""One array's layout as index arithmetic, the model every pass and kernel generator reads.
 
 An :class:`IndexMap` places the cells of an array of logical (row-major) ``shape`` in a laid-out buffer
 of :meth:`IndexMap.extents`: each physical axis is one mixed-radix digit ``(i[dim] // stride) % live``

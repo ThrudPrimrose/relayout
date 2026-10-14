@@ -10,9 +10,8 @@ A layout rewrites accesses, not loops: a map over ``j`` reading an array blocked
 needs nothing here.
 """
 
-import sympy
-
 import dace
+import sympy
 from dace import nodes, symbolic
 from dace.sdfg.narrowing import as_expr
 from dace.sdfg.state import SDFGState

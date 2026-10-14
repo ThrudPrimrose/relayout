@@ -8,8 +8,8 @@ from dataclasses import dataclass
 
 import dace
 
-from relayout.frontends.schedule import canonicalize_schedule
-from relayout.frontends.sdfg import relayout_array
+from relayout.passes.sdfg.canonicalize_schedule import canonicalize_schedule
+from relayout.passes.sdfg.relayout_array import relayout_array
 from relayout.layout import IndexMap
 from relayout.ops import (
     ArrayName,

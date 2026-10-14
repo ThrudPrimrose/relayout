@@ -59,4 +59,4 @@ target-version = "py312"
 # Copied verbatim from dace@extended tests/transformations/layout/kernels.
 "corpus/k*.py" = ["E731"]
 # An explicit dace tasklet binds its connectors (a << A[...]) by name, which pyflakes cannot see.
-"tests/test_schedule.py" = ["F821", "F841"]
+"tests/test_sdfg_canonicalize_schedule.py" = ["F821", "F841"]

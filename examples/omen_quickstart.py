@@ -7,7 +7,7 @@ Run: ``python examples/omen_quickstart.py``.
 
 import numpy as np
 
-from relayout.frontends.sdfg import apply_requests
+from relayout.passes.sdfg.apply_requests import apply_requests
 from relayout.corpus import omen_sse
 from relayout.corpus.omen_sse.sse import sse
 from relayout.ops import ArraySpec, lower

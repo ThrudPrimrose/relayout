@@ -1,5 +1,5 @@
 # Copyright 2026 ETH Zurich and the relayout authors.
-"""The SDFG frontend: a program whose arrays are laid out (arguments converted in and out, transients
+"""The SDFG passes: a program whose arrays are laid out (arguments converted in and out, transients
 in place) computes what it computed before."""
 
 import copy
@@ -12,7 +12,11 @@ from dace import nodes
 from dace.libraries.blas.nodes.symm import Symm
 from dace.libraries.blas.nodes.syrk import Syrk
 
-from relayout.frontends.sdfg import LayoutError, apply_requests, relayout_array
+from relayout.passes.sdfg.common import LayoutError
+
+from relayout.passes.sdfg.apply_requests import apply_requests
+
+from relayout.passes.sdfg.relayout_array import relayout_array
 from relayout.layout import IndexMap
 from relayout.ops import ArraySpec, Block, Pad, Permute, Shuffle, run
 from relayout.requests import parse_requests

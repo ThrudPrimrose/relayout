@@ -1,12 +1,12 @@
 # Copyright 2026 ETH Zurich and the relayout authors.
-"""How a library call absorbs a laid-out operand, independent of the frontend.
+"""How a library call absorbs a laid-out operand, independent of the pass.
 
 An operand ``X`` stored permuted is the buffer ``S = transpose(X, perm)``: axis ``k`` of ``S`` is axis
 ``perm[k]`` of ``X`` (:meth:`relayout.layout.IndexMap.permutation`). A call on ``X`` becomes the same
 call on ``S`` with its axis arguments renamed: a transpose composes, an einsum operand reorders its
 subscripts, a contraction or a reduction renames its axes, a 2-D BLAS operand flips its transpose
-flag. Each rule is a pure function of the call's arguments; the Python and SDFG frontends apply them
-to their own call forms. A layout that is not a permutation is not absorbed by any call: the frontend
+flag. Each rule is a pure function of the call's arguments; the Python and SDFG passes apply them
+to their own call forms. A layout that is not a permutation is not absorbed by any call: the pass
 converts the operand (:mod:`relayout.convert`) or refuses.
 """
 

@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping, Sequence
 
 import dace
 
-from relayout.frontends.sdfg import zip_arrays
+from relayout.passes.sdfg.zip_arrays import zip_arrays
 from relayout.ops import Block, Permute, Shuffle
 from relayout.search.layouts import Layout, lay_out
 from relayout.search.measure import Candidate, candidate_name

@@ -7,7 +7,7 @@ import itertools
 
 from relayout.corpus import k05_spmv, k09_particle_field_affinity
 from relayout.search.candidates import apply_layout, layouts_of, shuffled, zip_fields
-from relayout.frontends.sdfg import prepare
+from relayout.passes.sdfg.prepare import prepare
 from relayout.ops import Block, Pad, Permute, Shuffle
 from relayout.search.layouts import IDENTITY, Layout, blockings, permutations
 

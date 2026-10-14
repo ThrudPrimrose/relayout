@@ -20,8 +20,10 @@ import dace
 from dace import symbolic
 from dace.sdfg import propagation
 
-from relayout.frontends.schedule import canonicalize_schedule
-from relayout.frontends.sdfg import CONVERSION, Laid, covers, laid_out_descriptor, rewrite_accesses, transfer
+from relayout.passes.sdfg.canonicalize_schedule import canonicalize_schedule
+from relayout.passes.sdfg.common import CONVERSION, covers, laid_out_descriptor
+from relayout.passes.sdfg.placement import Laid
+from relayout.passes.sdfg.rewrite_accesses import rewrite_accesses, transfer
 from relayout.layout import IndexMap
 from relayout.search.cost import LogGP, count_nest, exposed_concurrency, nest_memory_time, relayout_time
 from relayout.search.layouts import Layout, lay_out

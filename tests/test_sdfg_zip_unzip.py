@@ -8,7 +8,10 @@ import pytest
 
 import dace
 from tests.conftest import variant
-from relayout.frontends.sdfg import apply_requests, relayout_array, unzip_array, zip_arrays
+from relayout.passes.sdfg.apply_requests import apply_requests
+from relayout.passes.sdfg.relayout_array import relayout_array
+from relayout.passes.sdfg.unzip_array import unzip_array
+from relayout.passes.sdfg.zip_arrays import zip_arrays
 from relayout.ops import ArraySpec, Permute, run
 from relayout.requests import parse_requests
 

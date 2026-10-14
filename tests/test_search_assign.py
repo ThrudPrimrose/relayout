@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 from tests.conftest import variant
 
-from relayout.frontends.sdfg import prepare
+from relayout.passes.sdfg.prepare import prepare
 from relayout.search.assign import (
     AssignmentCosts,
     apply_assignment,

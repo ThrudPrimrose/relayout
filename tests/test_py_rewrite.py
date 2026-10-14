@@ -1,5 +1,5 @@
 # Copyright 2026 ETH Zurich and the relayout authors.
-"""The numpy / mpi4py frontend: a program rewritten for laid-out arrays, run on the laid-out buffers,
+"""The numpy / mpi4py passes: a program rewritten for laid-out arrays, run on the laid-out buffers,
 gives what the original gives on the logical arrays."""
 
 import ast
@@ -13,7 +13,9 @@ import pytest
 
 from tests.conftest import LAYOUT_CASES, LAYOUT_SHAPE, mpi_or_skip
 from relayout.convert import from_layout, to_layout
-from relayout.frontends.python import LayoutError, Unzipped, Zipped, rewrite
+from relayout.passes.py.common import LayoutError
+from relayout.passes.py.regroup import Unzipped, Zipped
+from relayout.passes.py.rewrite import rewrite
 from relayout.layout import IndexMap
 from relayout.ops import ArraySpec, Block, Pad, Permute, Shuffle, run
 
@@ -116,7 +118,7 @@ def exchange(comm: Any, A: np.ndarray, N: int, M: int) -> None:  # an mpi4py com
     comm.Sendrecv(A[0, :], dest=0, recvbuf=A[2, :], source=0)
 
 
-#: The layout cases numpy views without a copy, which an mpi4py buffer of the Python frontend needs.
+#: The layout cases numpy views without a copy, which an mpi4py buffer of the Python passes needs.
 VIEWED_CASES = [case for case in LAYOUT_CASES if layout(LAYOUT_CASES[case], ("N", "M")).view() is not None]
 
 

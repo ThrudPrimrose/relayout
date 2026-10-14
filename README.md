@@ -19,7 +19,7 @@ relayout follows dace's `extended` branch; dace, islpy, z3 and numpy are depende
 kernel of OMEN (Ziogas et al., SC'19) on one node and distributes it as SC19 does:
 
 ```python
-from relayout.frontends.sdfg import apply_requests
+from relayout.passes.sdfg.apply_requests import apply_requests
 from relayout.corpus.omen_sse.sse import sse
 from relayout.ops import ArraySpec, lower
 from relayout.requests import parse_requests
@@ -50,9 +50,8 @@ lower(distributed.run([ArraySpec(name, 5) for name in ...], ranks=4))   # each a
 | `relayout.convert` | conversion kernels: one gather that casts, lays out and changes sparse formats in a single pass, as C with OpenMP and as a CUDA / HIP kernel; numpy forms for tests |
 | `relayout.sparse` | sparse formats (csr, csc, coo, bsr, dia, ell) planned once from a canonical CSR, every format decoded back to it and converted to every other; values move through the gather; `boundary` calls a program (Python or SDFG) written for one format with another, converting at the call |
 | `relayout.rules` | how a library call absorbs a permuted operand: transpose, einsum, contraction / reduction axes, BLAS transpose flags (gemm, matmul, syrk) and triangles (syrk, symm) |
-| `relayout.frontends.python` | a numpy / mpi4py program rewritten for laid-out arrays (element accesses, logical views, packed MPI buffers) |
-| `relayout.frontends.sdfg` | an SDFG rewritten for laid-out arrays: one rewrite for every layout, library nodes by their rules, MPI library nodes through packed buffers; `zip` / `unzip` along a dimension (data-dependent indices select their part), `zip` of different element types into an array of structs, and `cast` through FP-Arena (extra `fparena`) |
-| `relayout.frontends.schedule` | the schedule after a layout: maps tiled to the blocks their arrays are cut into, tiles over flat arrays merged back, map nests ordered by stride |
+| `relayout.passes.py` | Python passes, one module each: `rewrite_accesses` (element accesses, logical views, packed MPI buffers of laid-out arrays), `regroup` (`zip` / `unzip`), `rewrite` (both, in order) |
+| `relayout.passes.sdfg` | SDFG passes, one module each: `prepare` (untile, canonicalize, packed arrays only), `relayout_array` (one rewrite for every layout: permute, block, split, pad, shuffle; library nodes by their rules), `zip_arrays` / `unzip_array` (along a dimension, data-dependent indices select their part; different element types zip into an array of structs), `cast_array` (FP-Arena, extra `fparena`), `pack_mpi_buffers` (MPI buffers through packed transients), `unblock_dimensions` / `untile_blocked_loops` (hand-blocked arrays and tiled loops flattened), `canonicalize_schedule` (maps tiled to the blocks their arrays are cut into, tiles over flat arrays merged back, map nests ordered by stride), `apply_requests` (a request's operations, in order); shared by them: `common`, `placement`, `rewrite_accesses`, `library_rules` |
 | `relayout.search` | which layout each array takes: a program as a line of kernels, each kernel's layouts costed by the LogGP model or measured, one trajectory per array chosen globally (Viterbi DP, with greedy and enumeration as checks) and applied with conversions between segments |
 | `relayout.corpus` (`corpus/`) | the input programs: the OMEN SSE kernel (Python, Fortran, MPI), the layout witness kernels and Fortran inputs, each with a numpy oracle; the layouts tried on them live in `tests/layout_candidates.py` |
 
@@ -61,5 +60,5 @@ The request format and the lowering are described in [docs/layout.md](docs/layou
 ## Tests
 
 `pytest` runs everything on one process; the MPI tests also run under
-`mpirun -n 2 pytest tests/test_frontend_sdfg_mpi.py tests/test_omen_sse_mpi.py`, and the device kernels
+`mpirun -n 2 pytest tests/test_sdfg_pack_mpi_buffers.py tests/test_omen_sse_mpi.py`, and the device kernels
 where cupy finds a GPU.

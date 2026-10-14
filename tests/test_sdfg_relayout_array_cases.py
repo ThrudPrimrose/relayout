@@ -8,7 +8,10 @@ import pytest
 
 import dace
 from tests.conftest import variant
-from relayout.frontends.sdfg import physical_subset, prepare, relayout_array, rewrite_subscripts
+from relayout.passes.sdfg.placement import physical_subset
+from relayout.passes.sdfg.prepare import prepare
+from relayout.passes.sdfg.relayout_array import relayout_array
+from relayout.passes.sdfg.rewrite_accesses import rewrite_subscripts
 from relayout.layout import IndexMap
 from relayout.ops import ArraySpec, Block, Pad, Permute, Shuffle, run
 

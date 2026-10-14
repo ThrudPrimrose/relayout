@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from tests.conftest import flang_missing, mpi_or_skip
-from relayout.frontends.sdfg import apply_requests
+from relayout.passes.sdfg.apply_requests import apply_requests
 from relayout.corpus import omen_sse
 from relayout.requests import parse_requests
 

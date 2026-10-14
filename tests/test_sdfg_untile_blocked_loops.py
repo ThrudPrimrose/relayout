@@ -4,7 +4,7 @@
 import dace
 import numpy as np
 
-from relayout.frontends.untile import UntileBlockedLoops
+from relayout.passes.sdfg.untile_blocked_loops import UntileBlockedLoops
 
 N = dace.symbol("N")
 

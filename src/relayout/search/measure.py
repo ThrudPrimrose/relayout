@@ -18,7 +18,7 @@ import dace
 import numpy
 from dace import nodes
 
-from relayout.frontends.sdfg import CONVERSION
+from relayout.passes.sdfg.common import CONVERSION
 from relayout.ops import Location
 from relayout.search.layouts import IDENTITY, Layout, lay_out
 from relayout.search.program import Kernel, extract_nest, nest_arguments, rename, written_arrays

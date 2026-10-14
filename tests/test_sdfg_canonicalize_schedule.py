@@ -8,8 +8,9 @@ import numpy as np
 import dace
 from tests.conftest import variant
 from dace import nodes
-from relayout.frontends.schedule import canonicalize_schedule
-from relayout.frontends.sdfg import prepare, relayout_array
+from relayout.passes.sdfg.canonicalize_schedule import canonicalize_schedule
+from relayout.passes.sdfg.prepare import prepare
+from relayout.passes.sdfg.relayout_array import relayout_array
 from relayout.layout import IndexMap
 from relayout.ops import ArraySpec, Block, Permute, run
 
