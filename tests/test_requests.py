@@ -78,17 +78,17 @@ def test_every_registered_action_round_trips_through_json() -> None:
     ("raw", "match"),
     [
         ({"action": "bogus"}, r"operations\[0\].action must be one of"),
-        ({"action": "cast", "array": "A", "to": "fp42"}, r"operations\[0\].to must be one of"),
+        ({"action": "cast", "array": "A", "to": "fp42"}, r"operations\[0\]: (?s:.*)\nto\n  Input should be 'fp64'"),
         ({"action": "block", "array": "A", "digit": "P0", "factor": 2, "into": ["a", "b"]}, "other than P, P0"),
         ({"action": "block", "array": "A", "digit": "i0", "factor": 2, "into": ["a"]}, "two digits the cut leaves"),
         (
             {"action": "block", "array": "A", "digit": "i0", "factor": 4, "into": ["a", "b"], "dim": 1},
-            r"unknown field\(s\) \['dim'\]",
+            r"operations\[0\]: (?s:.*)\ndim\n  Unexpected keyword argument",
         ),
         ({"action": "shuffle", "array": "A", "digits": ["i0"], "f": ["i0 ** 2"], "f_inv": ["i0"]}, "uses Pow"),
-        ({"action": "distribute", "array": "A", "grid_dim": 0}, r"operations\[0\]: name either the digit"),
+        ({"action": "distribute", "array": "A", "grid_dim": 0}, r"operations\[0\]: (?s:.*)name either the digit"),
         ({"action": "zip", "arrays": ["u"], "into": "uv"}, "two or more names"),
-        ({"action": "place", "array": "A", "on": "gpu"}, "must be one of"),
+        ({"action": "place", "array": "A", "on": "gpu"}, r"\non\n  Input should be 'host' or 'device'"),
     ],
 )
 def test_a_malformed_operation_is_refused_by_its_entry(raw: dict[str, object], match: str) -> None:
@@ -99,12 +99,12 @@ def test_a_malformed_operation_is_refused_by_its_entry(raw: dict[str, object], m
 @pytest.mark.parametrize(
     ("raw", "match"),
     [
-        ({"startup": {"grid": []}}, "non-empty list of extents over P"),
+        ({"startup": {"grid": []}}, r"startup.grid\n  Tuple should have at least 1 item"),
         ({"startup": {"grid": ["P ** 2"]}}, "uses Pow"),
-        ({"startup": {"load": "openblas"}}, "list of library names"),
-        ({"startup": {"compiler": "gcc"}}, "takes load and grid"),
-        ({"layout": {}}, "takes startup and operations"),
-        ({"operations": {}}, "must be a list of operations"),
+        ({"startup": {"load": "openblas"}}, r"startup.load\n  Input should be a valid tuple"),
+        ({"startup": {"compiler": "gcc"}}, r"startup.compiler\n  Unexpected keyword argument"),
+        ({"layout": {}}, r"\nlayout\n  Unexpected keyword argument"),
+        ({"operations": {}}, r"\noperations\n  Input should be a valid tuple"),
     ],
 )
 def test_a_malformed_request_is_refused(raw: dict[str, object], match: str) -> None:
@@ -117,7 +117,8 @@ def test_the_json_schema_has_one_branch_per_action() -> None:
     branches = schema["properties"]["operations"]["items"]["oneOf"]  # type: ignore[index]
     by_action = {branch["properties"]["action"]["const"]: branch for branch in branches}
     assert set(by_action) == set(SAMPLES)
-    assert by_action["cast"]["properties"]["to"] == {"enum": ["fp64", "fp32", "fp16", "bf16", "fp8_e4m3", "fp8_e5m2"]}
+    assert by_action["cast"]["properties"]["to"] == {"$ref": "#/$defs/Precision"}
+    assert schema["$defs"]["Precision"]["enum"] == ["fp64", "fp32", "fp16", "bf16", "fp8_e4m3", "fp8_e5m2"]  # type: ignore[index]
     assert by_action["distribute"]["required"] == ["action", "array", "grid_dim"]
     assert by_action["block"]["additionalProperties"] is False
 
@@ -126,5 +127,5 @@ if __name__ == "__main__":
     test_a_request_is_its_operation_classes()
     test_every_registered_action_round_trips_through_json()
     test_a_malformed_operation_is_refused_by_its_entry({"action": "bogus"}, r"operations\[0\].action must be one of")
-    test_a_malformed_request_is_refused({"layout": {}}, "takes startup and operations")
+    test_a_malformed_request_is_refused({"layout": {}}, r"\nlayout\n  Unexpected keyword argument")
     test_the_json_schema_has_one_branch_per_action()

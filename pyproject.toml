@@ -13,6 +13,7 @@ requires-python = ">=3.12, <3.15"
 dependencies = [
     "dace",
     "numpy>=2.3.2",
+    "pydantic>=2",
     "islpy",
     "z3-solver",
 ]
