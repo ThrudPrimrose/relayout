@@ -169,6 +169,27 @@ def test_a_json_request_lays_out_the_program() -> None:
     np.testing.assert_allclose(b, reference(a))
 
 
+@pytest.mark.parametrize(
+    "request_json",
+    [
+        {"operations": [{"action": "replicate", "array": "A"}]},
+        {"operations": [{"action": "place", "array": "A", "on": "device"}]},
+        {
+            "startup": {"grid": ["P"]},
+            "operations": [{"action": "distribute", "array": "A", "grid_dim": 0, "dim": 0, "scheme": "block"}],
+        },
+        {"startup": {"load": ["blas"]}, "operations": []},
+        {"operations": [{"action": "format", "array": "A", "to": "csr"}]},
+    ],
+    ids=["replicate", "place", "distribute", "load", "format"],
+)
+def test_what_the_caller_carries_out_is_refused_by_name(request_json: dict) -> None:
+    """A rewrite of one node's program refuses what only the caller of the program can carry out."""
+    sdfg = stencil.to_sdfg(simplify=True)
+    with pytest.raises(LayoutError, match="belong to the caller"):
+        apply_requests(sdfg, parse_requests(request_json))
+
+
 def test_a_cast_changes_the_element_type_before_the_layout() -> None:
     """``cast`` A to fp32 (FP-Arena, the interface stays fp64) and permute the fp32 copy."""
     pytest.importorskip("fp_arena")
@@ -279,6 +300,13 @@ def test_an_argument_written_in_part_keeps_the_cells_the_program_leaves() -> Non
 
 
 if __name__ == "__main__":
+    for refused in (
+        {"operations": [{"action": "replicate", "array": "A"}]},
+        {"operations": [{"action": "place", "array": "A", "on": "device"}]},
+        {"startup": {"load": ["blas"]}, "operations": []},
+        {"operations": [{"action": "format", "array": "A", "to": "csr"}]},
+    ):
+        test_what_the_caller_carries_out_is_refused_by_name(refused)
     test_syrk_symm_and_reduce_absorb_a_transposed_operand()
     test_a_cast_changes_the_element_type_before_the_layout()
     test_an_argument_written_in_part_keeps_the_cells_the_program_leaves()

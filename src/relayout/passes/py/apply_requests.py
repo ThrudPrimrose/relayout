@@ -10,11 +10,12 @@ from collections.abc import Mapping
 
 from relayout.ops import ArraySpec, Cast, DigitOperation, Requests, Unzip, Zip
 from relayout.passes.py.cast_array import PRECISION_TYPES, cast_array
-from relayout.passes.py.common import Array, kernel
+from relayout.passes.py.common import Array, LayoutError, kernel
 from relayout.passes.py.pack_mpi_buffers import MpiBuffer, pack_mpi_buffers
 from relayout.passes.py.relayout_array import relayout_array
 from relayout.passes.py.unzip_array import unzip_array
 from relayout.passes.py.zip_arrays import zip_arrays, zipped_array
+from relayout.passes.single_node import unapplied
 
 __all__ = ["apply_requests"]
 
@@ -26,7 +27,10 @@ def apply_requests(
     element types in ``arrays``): ``cast`` (:func:`~relayout.passes.py.cast_array.cast_array`), ``zip`` and
     ``unzip`` in program order, so a cast before a zip makes a struct of the cast types; then every array a digit
     operation touched is laid out as the operations leave it. Returns the name each requested array is now worked
-    on."""
+    on. A request the caller must carry out in part is refused (:func:`~relayout.passes.single_node.unapplied`)."""
+    refusal = unapplied(requests)
+    if refusal is not None:
+        raise LayoutError(refusal)
     known = dict(arrays)
     state = requests.run([ArraySpec(name, len(a.shape), element=a.element) for name, a in known.items()])
     working: dict[str, str] = {}

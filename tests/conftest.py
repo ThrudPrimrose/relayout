@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from relayout.ops import Block, LinearShuffle, Operation, Pad, Permute, Shuffle
+from relayout.ops import Block, LinearShuffle, Operation, Pad, Permute, Shuffle, Split, Unblock, Unpad, Unsplit
 
 
 def mpi_or_skip() -> Any:  # noqa: ANN401  # the mpi4py.MPI module
@@ -60,10 +60,11 @@ def variant(sdfg: object, suffix: str) -> None:
         inner.name = f"{inner.name}_{suffix}"
 
 
-#: Every single-node digit operation on a 2-D array ``A`` (rows ``i0``, columns ``i1``; ``split`` only lays bands out
-#: for a distribution, tests/test_ops.py), alone and composed: the cases each
-#: layout check (index map, conversion kernels, MPI transfers) runs over. Valid at any extents, so the MPI tests
-#: use them on ``[P, N]``; the fixed-shape tests use :data:`LAYOUT_SHAPE`, where ``block_ragged`` leaves dead cells.
+#: Every single-node digit operation on a 2-D array ``A`` (rows ``i0``, columns ``i1``), alone, composed and undone
+#: by its inverse (``split`` alone only lays bands out for a distribution, tests/test_ops.py; with its ``unsplit`` it
+#: is in ``inverses``): the cases each layout check (index map, conversion kernels, SDFG and Python passes, MPI
+#: transfers) runs over. Valid at any extents, so the MPI tests use them on ``[P, N]``; the fixed-shape tests use
+#: :data:`LAYOUT_SHAPE`, where ``block_ragged`` leaves dead cells.
 LAYOUT_CASES: dict[str, list[Operation]] = {
     "permute": [Permute("A", ("i1", "i0"))],
     "block": [Block("A", "i1", "2", ("o", "f"))],
@@ -76,6 +77,27 @@ LAYOUT_CASES: dict[str, list[Operation]] = {
         LinearShuffle("A", ("w", "c"), (1, 1), ((1, 0), (1, 1))),
     ],
     "composed": [Block("A", "i1", "2", ("o", "f")), Pad("A", "i0", "1"), Permute("A", ("o", "i0", "f"))],
+    # every inverse: unpad, unblock and unsplit undo their cut, the permutations around them stay
+    "inverses": [
+        Block("A", "i1", "2", ("o", "f")),
+        Pad("A", "i0", "1"),
+        Permute("A", ("f", "i0", "o")),
+        Unpad("A", "i0", "1"),
+        Permute("A", ("i0", "o", "f")),
+        Unblock("A", ("o", "f"), "2", "i1"),
+        Split("A", "i0", "2", ("b", "w")),
+        Unsplit("A", ("b", "w"), "2", "i0"),
+        Permute("A", ("i1", "i0")),
+    ],
+    # an unblock that leaves another cut in place, and a pad on a fine digit
+    "partial_inverse": [
+        Block("A", "i1", "2", ("o", "f")),
+        Block("A", "i0", "2", ("p", "g")),
+        Permute("A", ("o", "p", "g", "f")),
+        Permute("A", ("p", "g", "o", "f")),
+        Unblock("A", ("p", "g"), "2", "i0"),
+        Pad("A", "f", "1"),
+    ],
 }
 
 #: The logical shape the fixed-shape layout checks use.

@@ -129,6 +129,26 @@ def test_a_json_request_lays_out_the_function() -> None:
     run_stencil(function.function, 5, 3, 8)
 
 
+@pytest.mark.parametrize(
+    "request_json",
+    [
+        {"operations": [{"action": "replicate", "array": "A"}]},
+        {"operations": [{"action": "place", "array": "A", "on": "device"}]},
+        {
+            "startup": {"grid": ["P"]},
+            "operations": [{"action": "distribute", "array": "A", "grid_dim": 0, "dim": 0, "scheme": "block"}],
+        },
+        {"startup": {"load": ["blas"]}, "operations": []},
+        {"operations": [{"action": "format", "array": "A", "to": "csr"}]},
+    ],
+    ids=["replicate", "place", "distribute", "load", "format"],
+)
+def test_what_the_caller_carries_out_is_refused_by_name(request_json: dict) -> None:
+    """A rewrite of one node's function refuses what only the caller of the function can carry out."""
+    with pytest.raises(LayoutError, match="belong to the caller"):
+        rewritten(stencil, lambda tree: apply_requests(tree, parse_requests(request_json), ARRAYS))
+
+
 def test_a_cast_changes_the_element_type_before_the_layout() -> None:
     """``cast`` A to fp32 (the interface stays fp64) and permute the fp32 copy."""
     request = parse_requests(
@@ -198,6 +218,13 @@ def test_a_local_defined_by_an_expression_is_converted_in_and_negative_indices_c
 
 
 if __name__ == "__main__":
+    for refused in (
+        {"operations": [{"action": "replicate", "array": "A"}]},
+        {"operations": [{"action": "place", "array": "A", "on": "device"}]},
+        {"startup": {"load": ["blas"]}, "operations": []},
+        {"operations": [{"action": "format", "array": "A", "to": "csr"}]},
+    ):
+        test_what_the_caller_carries_out_is_refused_by_name(refused)
     test_laid_out_arguments_and_locals_compute_the_same(
         [Permute("A", ("i1", "i0"))], [Pad("A", "i0", "2")], [Permute("A", ("i1", "i0"))]
     )

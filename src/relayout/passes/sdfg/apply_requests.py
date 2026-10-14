@@ -15,6 +15,8 @@ from relayout.passes.sdfg.pack_mpi_buffers import MpiBuffer, pack_mpi_buffers
 from relayout.passes.sdfg.relayout_array import relayout_array
 from relayout.passes.sdfg.unzip_array import unzip_array
 from relayout.passes.sdfg.zip_arrays import zip_arrays
+from relayout.passes.sdfg.common import LayoutError
+from relayout.passes.single_node import unapplied
 
 __all__ = ["apply_requests"]
 
@@ -23,7 +25,12 @@ def apply_requests(sdfg: dace.SDFG, requests: Requests) -> dict[str, str]:
     """Carry ``requests``' operations out on ``sdfg`` (single node): ``cast`` (:func:`cast_array`, FP-Arena),
     ``zip`` and ``unzip`` (:func:`zip_arrays`, :func:`unzip_array`) in program order, so a cast before a zip
     makes a struct of the cast types; then every array a digit operation touched is laid out as the
-    operations leave it (:func:`relayout_array`). Returns the name each requested array is now worked on."""
+    operations leave it (:func:`relayout_array`). Returns the name each requested array is now worked on. A
+    request the caller must carry out in part is refused (:func:`~relayout.passes.single_node.unapplied`)."""
+
+    refusal = unapplied(requests)
+    if refusal is not None:
+        raise LayoutError(refusal)
 
     def arrays() -> dict[str, data.Array]:
         return {n: d for n, d in sdfg.arrays.items() if isinstance(d, data.Array) and not isinstance(d, data.View)}
