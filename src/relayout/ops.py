@@ -22,11 +22,13 @@ import dataclasses
 import enum
 import itertools
 import math
-import types
-import typing
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, NamedTuple, NewType, NoReturn
+from typing import Annotated, Any, ClassVar, Literal, NamedTuple, NoReturn
+
+from pydantic import AfterValidator, BeforeValidator, ConfigDict, Field, PlainSerializer, ValidationInfo
+from pydantic import WithJsonSchema
+from pydantic.dataclasses import dataclass as pydantic_dataclass
 
 from relayout.convert import ELEMENTS
 from relayout.expr import check_index_expr, eval_index, is_root, node_names
@@ -35,7 +37,7 @@ from relayout.sparse import SparseFormat
 
 __all__ = [
     "DIM_DIGIT",
-    "FIELD_CHECKS",
+    "OPERATION_CONFIG",
     "GRID_SYMBOL",
     "OPERATIONS",
     "RANKS_SYMBOL",
@@ -95,7 +97,7 @@ __all__ = [
     "normal_split",
     "operation",
     "operations_for_axes",
-    "optional_inner",
+    "expr_json",
     "run",
 ]
 
@@ -186,34 +188,34 @@ def grid_extents(grid: Sequence[str], ranks: int, where: str) -> tuple[int, ...]
     return extents if math.prod(extents) == ranks else None
 
 
-# ---- field types (each has a JSON codec in relayout.requests) -----------------------------------------------
+# ---- field types: each validates itself, from Python and from JSON alike ----------------------------------
 
-#: An array name.
-ArrayName = NewType("ArrayName", str)
-#: Two or more distinct array names.
-ArrayNames = NewType("ArrayNames", tuple[str, ...])
-#: A digit's name: an identifier other than the grid and rank symbols.
-DigitName = NewType("DigitName", str)
-#: Distinct digit names (a permutation, the digits a shuffle renumbers).
-DigitNames = NewType("DigitNames", tuple[str, ...])
-#: The two digits a cut leaves, coarse then fine.
-DigitPair = NewType("DigitPair", tuple[str, str])
-#: An array dimension.
-Dim = NewType("Dim", int)
-#: A processor-grid dimension.
-GridDim = NewType("GridDim", int)
-#: A block width.
-Width = NewType("Width", int)
-#: An integer expression over ``P0, P1, ...`` (a factor, an amount, a part count).
-Expr = NewType("Expr", str)
-#: One index expression per shuffled digit, over the shuffled digits' names and ``P0, P1, ...``.
-IndexExprs = NewType("IndexExprs", tuple[str, ...])
-#: The bit width of each shuffled digit (its extent is ``2**bits``).
-Bits = NewType("Bits", tuple[int, ...])
-#: A square 0/1 matrix over GF(2): row ``r`` is output bit ``r`` as the XOR of the input bits it marks.
-BitMatrix = NewType("BitMatrix", tuple[tuple[int, ...], ...])
-#: A sparse format label (``csr``, ``bsr:4``, ...); the caller checks it against the formats it offers.
-FormatLabel = NewType("FormatLabel", str)
+
+def checked(check: Callable[[Any, str], object]) -> AfterValidator:
+    """``check(value, field)`` as a pydantic validator; a refusal names the field."""
+
+    def run(value: Any, info: ValidationInfo) -> Any:
+        check(value, info.field_name or "value")
+        return value
+
+    return AfterValidator(run)
+
+
+def expr_text(value: object) -> str:
+    """An integer expression from JSON: an int literal or a string (a bool is neither)."""
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError(f"must be an int or an integer expression; got {value!r}")
+    return str(value)
+
+
+def expr_json(text: str) -> int | str:
+    """``text`` back as JSON: a plain integer literal as an int."""
+    return int(text) if text.lstrip("-").isdigit() else text
+
+
+def check_bit_matrix(rows: Sequence[Sequence[int]], where: str) -> None:
+    if not rows or any(len(row) != len(rows) for row in rows):
+        raise ValueError(f"{where} must be a square 0/1 matrix (a list of rows); got {[list(r) for r in rows]}")
 
 
 def is_reserved(name: str) -> bool:
@@ -268,26 +270,38 @@ def check_index_exprs(texts: Sequence[str], where: str) -> None:
         check_index_expr(text, f"{where}[{k}]")
 
 
-def optional_inner(hint: object) -> tuple[object, bool]:
-    """``hint`` without ``| None`` and whether it had it; ``NewType | None`` is a ``typing.Union`` before
-    Python 3.14 and a ``types.UnionType`` from it."""
-    if typing.get_origin(hint) in (typing.Union, types.UnionType) and type(None) in typing.get_args(hint):
-        (inner,) = (arg for arg in typing.get_args(hint) if arg is not type(None))
-        return inner, True
-    return hint, False
-
-
-#: Field type -> its check, run on every operation at construction (from Python or from JSON).
-FIELD_CHECKS: dict[object, Callable[[Any, str], object]] = {
-    ArrayName: check_name,
-    ArrayNames: check_array_names,
-    DigitName: check_digit_name,
-    DigitNames: check_digit_names,
-    DigitPair: check_digit_pair,
-    Expr: check_index_expr,
-    IndexExprs: check_index_exprs,
-    FormatLabel: check_format_label,
-}
+#: An array name.
+ArrayName = Annotated[str, Field(min_length=1)]
+#: Two or more distinct array names.
+ArrayNames = Annotated[tuple[str, ...], checked(check_array_names)]
+#: A digit's name: an identifier other than the grid and rank symbols.
+DigitName = Annotated[str, checked(check_digit_name)]
+#: Distinct digit names (a permutation, the digits a shuffle renumbers).
+DigitNames = Annotated[tuple[str, ...], checked(check_digit_names)]
+#: The two digits a cut leaves, coarse then fine.
+DigitPair = Annotated[tuple[str, ...], checked(check_digit_pair)]
+#: An array dimension.
+Dim = Annotated[int, Field(strict=True, ge=0)]
+#: A processor-grid dimension.
+GridDim = Annotated[int, Field(strict=True, ge=0)]
+#: A block width.
+Width = Annotated[int, Field(strict=True, ge=1)]
+#: An integer expression over ``P0, P1, ...`` (a factor, an amount, a part count).
+Expr = Annotated[
+    str,
+    BeforeValidator(expr_text),
+    checked(check_index_expr),
+    PlainSerializer(expr_json, when_used="json"),
+    WithJsonSchema({"type": ["integer", "string"]}),
+]
+#: One index expression per shuffled digit, over the shuffled digits' names and ``P0, P1, ...``.
+IndexExprs = Annotated[tuple[str, ...], checked(check_index_exprs)]
+#: The bit width of each shuffled digit (its extent is ``2**bits``).
+Bits = Annotated[tuple[Annotated[int, Field(strict=True, ge=0)], ...], Field(min_length=1)]
+#: A square 0/1 matrix over GF(2): row ``r`` is output bit ``r`` as the XOR of the input bits it marks.
+BitMatrix = Annotated[tuple[tuple[Literal[0, 1], ...], ...], checked(check_bit_matrix)]
+#: A sparse format label (``csr``, ``bsr:4``, ...); the caller checks it against the formats it offers.
+FormatLabel = Annotated[str, checked(check_format_label)]
 
 
 # ---- the operation registry ------------------------------------------------------------------------
@@ -324,20 +338,10 @@ class Operation:
     sparse: ClassVar[bool] = False
 
     def __post_init__(self) -> None:
-        values = dataclasses.asdict(self)  # type: ignore[call-overload]  # every operation is a dataclass
-        for spec in dataclasses.fields(self):  # type: ignore[arg-type]
-            value = values[spec.name]
-            hint, optional = optional_inner(spec.type)
-            if optional and value is None:
-                continue
-            check = FIELD_CHECKS.get(hint)
-            if check is not None:
-                check(value, spec.name)
         self.validate()
 
     def validate(self) -> None:
-        """Checks across fields, at construction (a request fault); each field's own check is
-        :data:`FIELD_CHECKS`'."""
+        """Checks across fields, at construction (a request fault), after each field validated its type."""
 
     def apply(self, state: "State") -> None:
         raise NotImplementedError
@@ -346,6 +350,9 @@ class Operation:
         """The operation undoing this one, given the array's digit names before it (digit operations)."""
         raise ValueError(f"{self.action.value} has no inverse operation")
 
+
+#: Every operation validates its fields from Python and from JSON alike; an unknown field is a fault.
+OPERATION_CONFIG = ConfigDict(extra="forbid")
 
 #: Action -> its operation class.
 OPERATIONS: Registry[Action, type[Operation]] = Registry("operation")
@@ -767,7 +774,7 @@ def inverse_sequence(operations: Sequence[Operation], ndim: int) -> tuple[Operat
 
 
 @operation
-@dataclass(frozen=True, slots=True)
+@pydantic_dataclass(frozen=True, slots=True, config=OPERATION_CONFIG)
 class Cast(Operation):
     """Change array ``array``'s element type to ``to``; the judge converts it in before the call and out
     after it."""
@@ -785,7 +792,7 @@ class Cast(Operation):
 
 
 @operation
-@dataclass(frozen=True, slots=True)
+@pydantic_dataclass(frozen=True, slots=True, config=OPERATION_CONFIG)
 class Format(Operation):
     """Store sparse array ``array`` in format ``to``."""
 
@@ -802,7 +809,7 @@ class Format(Operation):
 
 
 @operation
-@dataclass(frozen=True, slots=True)
+@pydantic_dataclass(frozen=True, slots=True, config=OPERATION_CONFIG)
 class Zip(Operation):
     """Fuse whole arrays ``arrays`` of one shape into one array ``into``, the inverse of :class:`Unzip`.
     Arrays of one element type (:attr:`ArrayState.element_type`) are stacked along a new dimension, the field,
@@ -853,7 +860,7 @@ class Zip(Operation):
 
 
 @operation
-@dataclass(frozen=True, slots=True)
+@pydantic_dataclass(frozen=True, slots=True, config=OPERATION_CONFIG)
 class Unzip(Operation):
     """Split the whole array ``array`` into the arrays ``into``, the inverse of :class:`Zip`: a struct into
     one array per member (a complex array is the struct ``(re, im)``), a zipped array along its field, or,
@@ -908,7 +915,7 @@ class DigitOperation(Operation):
 
 
 @operation
-@dataclass(frozen=True, slots=True)
+@pydantic_dataclass(frozen=True, slots=True, config=OPERATION_CONFIG)
 class Block(DigitOperation):
     """Cut digit ``digit`` ``(d, s, e)`` into ``into``: coarse ``(d, s*b, ceil(e/b))`` and fine ``(d, s, b)``."""
 
@@ -927,7 +934,7 @@ class Block(DigitOperation):
 
 
 @operation
-@dataclass(frozen=True, slots=True)
+@pydantic_dataclass(frozen=True, slots=True, config=OPERATION_CONFIG)
 class Unblock(DigitOperation):
     """Merge the coarse and fine digits ``digits`` of a ``block`` by ``factor`` back into one digit ``into``."""
 
@@ -950,7 +957,7 @@ class Unblock(DigitOperation):
 
 
 @operation
-@dataclass(frozen=True, slots=True)
+@pydantic_dataclass(frozen=True, slots=True, config=OPERATION_CONFIG)
 class Split(DigitOperation):
     """Cut a whole dimension's digit ``digit`` into ``parts`` contiguous load-balanced bands (sizes differ
     by at most one): ``into`` names the band index (extent ``parts``) and the index within the band."""
@@ -970,7 +977,7 @@ class Split(DigitOperation):
 
 
 @operation
-@dataclass(frozen=True, slots=True)
+@pydantic_dataclass(frozen=True, slots=True, config=OPERATION_CONFIG)
 class Unsplit(DigitOperation):
     """Merge the band index and the index within the band ``digits`` of a ``split`` back into one digit."""
 
@@ -988,7 +995,7 @@ class Unsplit(DigitOperation):
 
 
 @operation
-@dataclass(frozen=True, slots=True)
+@pydantic_dataclass(frozen=True, slots=True, config=OPERATION_CONFIG)
 class Permute(DigitOperation):
     """Reorder array ``array``'s digit tuple to ``order``, every current digit named once."""
 
@@ -1009,7 +1016,7 @@ class Permute(DigitOperation):
 
 
 @operation
-@dataclass(frozen=True, slots=True)
+@pydantic_dataclass(frozen=True, slots=True, config=OPERATION_CONFIG)
 class Pad(DigitOperation):
     """Grow digit ``digit`` by ``amount`` dead cells."""
 
@@ -1028,7 +1035,7 @@ class Pad(DigitOperation):
 
 
 @operation
-@dataclass(frozen=True, slots=True)
+@pydantic_dataclass(frozen=True, slots=True, config=OPERATION_CONFIG)
 class Unpad(DigitOperation):
     """Drop ``amount`` dead cells from digit ``digit``."""
 
@@ -1048,7 +1055,7 @@ class Unpad(DigitOperation):
 
 
 @operation
-@dataclass(frozen=True, slots=True)
+@pydantic_dataclass(frozen=True, slots=True, config=OPERATION_CONFIG)
 class Shuffle(DigitOperation):
     """Renumber the digits ``digits`` by the bijection ``f`` (one expression per digit, over their names);
     the caller supplies its inverse ``f_inv``, checked exhaustively where the digits' extents are known
@@ -1073,7 +1080,7 @@ class Shuffle(DigitOperation):
 
 
 @operation
-@dataclass(frozen=True, slots=True)
+@pydantic_dataclass(frozen=True, slots=True, config=OPERATION_CONFIG)
 class LinearShuffle(DigitOperation):
     """Renumber the digits ``digits`` (extents ``2**bits``) by an invertible linear map over GF(2) on their
     bits (Linear Layouts, arXiv:2505.23819): the input bit vector is each digit's bits, least significant
@@ -1113,7 +1120,7 @@ class LinearShuffle(DigitOperation):
 
 
 @operation
-@dataclass(frozen=True, slots=True)
+@pydantic_dataclass(frozen=True, slots=True, config=OPERATION_CONFIG)
 class Distribute(DigitOperation):
     """Hand a digit of extent ``P_g`` to grid dimension ``grid_dim``: it becomes the rank coordinate and
     leaves the local tuple. Name the ``digit``, or use the short form ``dim`` + ``scheme`` (+ ``block_size``
@@ -1171,7 +1178,7 @@ class Distribute(DigitOperation):
 
 
 @operation
-@dataclass(frozen=True, slots=True)
+@pydantic_dataclass(frozen=True, slots=True, config=OPERATION_CONFIG)
 class Replicate(Operation):
     """Hold array ``array`` whole on every rank."""
 
@@ -1193,7 +1200,7 @@ class Replicate(Operation):
 
 
 @operation
-@dataclass(frozen=True, slots=True)
+@pydantic_dataclass(frozen=True, slots=True, config=OPERATION_CONFIG)
 class Place(Operation):
     """Keep array ``array`` in ``on`` memory (``host`` or ``device``) during the call."""
 
@@ -1289,13 +1296,17 @@ def operations_for_axes(array: str, axes: Sequence[AxisSplit | None]) -> tuple[O
     return ops
 
 
-@dataclass(frozen=True, slots=True)
+#: A processor grid: its extents over the rank count ``P``, at least one.
+Grid = Annotated[tuple[Expr, ...], Field(min_length=1)]
+
+
+@pydantic_dataclass(frozen=True, slots=True, config=OPERATION_CONFIG)
 class Startup:
     """What a request settles before any array is touched: the libraries to ``load`` and the processor
     ``grid``'s extents over the rank count ``P`` (None = not a distributed run)."""
 
-    load: tuple[str, ...] = ()
-    grid: tuple[str, ...] | None = None
+    load: tuple[ArrayName, ...] = ()
+    grid: Grid | None = None
 
 
 @dataclass(frozen=True, slots=True)

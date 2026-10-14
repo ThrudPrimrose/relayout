@@ -45,7 +45,7 @@ lower(distributed.run([ArraySpec(name, 5) for name in ...], ranks=4))   # each a
 | Module | What it does |
 | --- | --- |
 | `relayout.ops` | the request: `startup` (libraries, a processor grid over the rank count `P`) and `operations` run top to bottom (`cast`, `format`, `zip` / `unzip`, the digit cuts `block` / `split` / `permute` / `pad` / `shuffle` / `linear_shuffle` and their inverses, `distribute`, `replicate`, `place`); the lowering of a distribution to one split per dimension |
-| `relayout.requests` | the request's JSON, one to one with `relayout.ops`, and its JSON Schema |
+| `relayout.requests` | the request's JSON, one to one with `relayout.ops`, and its JSON Schema (both from pydantic) |
 | `relayout.layout` | `IndexMap`: one array's layout as index arithmetic, logical index to physical and back; the model everything below reads |
 | `relayout.convert` | conversion kernels: one gather that casts, lays out and changes sparse formats in a single pass, as C with OpenMP and as a CUDA / HIP kernel; numpy forms for tests |
 | `relayout.sparse` | sparse formats (csr, csc, coo, bsr, dia, ell) planned once from a canonical CSR, every format decoded back to it and converted to every other; values move through the gather; `boundary` calls a program (Python or SDFG) written for one format with another, converting at the call |
