@@ -26,8 +26,6 @@ ICS'99 (blocked layout).
 import dace
 import numpy
 
-from relayout.benchmarks import layouts_of
-from relayout.search.layouts import blockings, permutations
 
 N = dace.symbol("N")
 
@@ -45,14 +43,6 @@ def oracle(A, B):
 def make_inputs(n, seed=0):
     rng = numpy.random.default_rng(seed)
     return {"A": rng.random((n, n)), "B": rng.random((n, n))}
-
-
-def candidates():
-    """The Permute family (row- vs column-major storage of ``B``) and the Block family (rows of ``B`` in
-    contiguous ``[T, N]`` panels for T in {8, 16, 32})."""
-    cands = layouts_of("B", permutations("B", 2))
-    cands.update(layouts_of("B", blockings("B", 2, (8, 16, 32))))
-    return cands
 
 
 def run_closure(inputs, n):

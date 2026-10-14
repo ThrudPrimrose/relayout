@@ -39,8 +39,6 @@ SC26 layout paper Listing 2 (E6_VelocityTendencies indirect stencil), connectivi
 import dace
 import numpy
 
-from relayout.benchmarks import layouts_of
-from relayout.search.layouts import permutations
 
 NC, NV, NE, NL = dace.symbol("NC"), dace.symbol("NV"), dace.symbol("NE"), dace.symbol("NL")
 
@@ -90,21 +88,6 @@ def make_inputs(nc, nv, ne, nl, seed=0):
         "inv_primal": rng.random(ne),
         "tangent": rng.random(ne),
     }
-
-
-def candidates():
-    """The global layout candidates, each a single-array dimension permutation (identity included):
-
-      * ``w`` / ``z_w_v`` -- gathered field orientation, ``[N, NL]`` (horizontal-first) vs ``[NL, N]``
-        (vertical-first). The permute carries through the indirection's nested SDFG.
-      * ``cell_idx`` / ``vert_idx`` -- connectivity-table layout, ``[NE, 2]`` (AoS) vs ``[2, NE]`` (SoA).
-
-    Every permute is transparent, so all candidates reproduce the oracle; the sweep only picks the fastest physical layout.
-    """
-    cands = {}
-    for arr in ("w", "z_w_v", "cell_idx", "vert_idx"):
-        cands.update(layouts_of(arr, permutations(arr, 2)))
-    return cands
 
 
 def run_closure(inputs, nc, nv, ne, nl):

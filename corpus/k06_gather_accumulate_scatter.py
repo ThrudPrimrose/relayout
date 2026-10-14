@@ -24,9 +24,6 @@ isolation). Elementwise accumulate form so the layout is honest -- a BLAS ``zaxp
 import dace
 import numpy
 
-from relayout.benchmarks import layouts_of, shuffled
-from relayout.ops import Block, Shuffle
-from relayout.search.layouts import IDENTITY, Layout
 
 N = dace.symbol("N")
 
@@ -47,16 +44,6 @@ def make_inputs(n, seed=0):
     x = rng.random(n) + 1j * rng.random(n)
     y = rng.random(n) + 1j * rng.random(n)
     return {"x": x.astype(numpy.complex128), "y": y.astype(numpy.complex128)}
-
-
-def candidates():
-    """The layout candidates: renumber ``x`` by each bijection ``sigma`` (plus the unshuffled base). The
-    XOR swizzle ``i ^ 3`` permutes within each block of 4 (``3 - f`` on the block offset ``f``, so ``N``
-    a multiple of 4); the cyclic shift holds for any ``N``. Every Shuffle is transparent, so all candidates
-    reproduce the oracle."""
-    xor = Layout("gas_xor", (Block("x", "i0", "4", ("o", "f")), Shuffle("x", ("f",), ("3 - f",), ("3 - f",))))
-    cyclic = shuffled("x", "gas_cyc", "(i0 + 1) % N", "(i0 + N - 1) % N")
-    return layouts_of("x", [Layout(IDENTITY), xor, cyclic])
 
 
 def run_closure(inputs, n):

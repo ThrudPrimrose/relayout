@@ -14,8 +14,6 @@ al., PAX VLDB'01.
 import dace
 import numpy
 
-from relayout.benchmarks import layouts_of
-from relayout.search.layouts import permutations
 
 N, C = dace.symbol("N"), dace.symbol("C")
 
@@ -33,10 +31,6 @@ def oracle(T):
 def make_inputs(n, c, seed=0):
     rng = numpy.random.default_rng(seed)
     return {"T": rng.random((n, c))}
-
-
-def candidates():
-    return layouts_of("T", permutations("T", 2))
 
 
 def run_closure(inputs, n, c):

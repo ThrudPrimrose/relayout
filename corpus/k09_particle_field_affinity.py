@@ -22,8 +22,6 @@ Sung et al., in-place AoS->AoSoA (InPar'12).
 import dace
 import numpy
 
-from relayout.benchmarks import zip_fields
-from relayout.frontends.sdfg import prepare
 
 N = dace.symbol("N")
 
@@ -71,21 +69,6 @@ def oracle(x, y, z, vx, vy, vz, q, m):
 def make_inputs(n, seed=0):
     rng = numpy.random.default_rng(seed)
     return {f: rng.random(n) for f in FIELDS}
-
-
-def candidates():
-    """The global layout candidates for the particle state:
-
-    * ``soa``     -- identity: keep the F fields fully unzipped ([N] each).
-    * ``aos``     -- Zip all fields into one ``[N, F]`` array ``P`` (field-minor AoS).
-    * ``aosoa_V`` -- the Zip, then a Block of the particle axis by V -> ``P`` is ``[N/V, F, V]``.
-    """
-    return {
-        "soa": lambda sdfg: None,
-        "aos": lambda sdfg: zip_fields(sdfg, FIELDS, "P"),
-        "aosoa_4": lambda sdfg: zip_fields(prepare(sdfg), FIELDS, "P", 4),
-        "aosoa_8": lambda sdfg: zip_fields(prepare(sdfg), FIELDS, "P", 8),
-    }
 
 
 def run_closure(inputs, n):

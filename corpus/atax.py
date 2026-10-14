@@ -25,8 +25,6 @@ through the transient ``tmp`` instead of writing two independent outputs.
 import dace
 import numpy
 
-from relayout.benchmarks import layouts_of
-from relayout.search.layouts import permutations
 
 M, N = dace.symbol("M"), dace.symbol("N")
 
@@ -48,13 +46,6 @@ def oracle(A, x):
 def make_inputs(m, n, seed=0):
     rng = numpy.random.default_rng(seed)
     return {"A": rng.random((m, n)), "x": rng.random(n)}
-
-
-def candidates():
-    """The global layout candidates for this kernel: every dimension permutation of the shared ``A``
-    (row-major vs column-major storage). All are transparent, so every candidate reproduces the
-    oracle."""
-    return layouts_of("A", permutations("A", 2))
 
 
 def run_closure(inputs, m, n):

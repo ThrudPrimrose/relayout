@@ -14,9 +14,6 @@ Source: Henretty et al., CC'11 (data-layout transformation for SIMD stencils).
 import dace
 import numpy
 
-from relayout.benchmarks import layouts_of
-from relayout.ops import Block, Permute
-from relayout.search.layouts import IDENTITY, Layout
 
 N = dace.symbol("N")
 W0, W1, W2 = 0.25, 0.5, 0.25
@@ -36,12 +33,6 @@ def oracle(x):
 
 def make_inputs(n, seed=0):
     return {"x": numpy.random.default_rng(seed).random(n)}
-
-
-def candidates():
-    """``x`` as it is and dimension-lifted ([V, N/V]) for V in {4, 8}."""
-    lifted = [Layout(f"dlt{v}", (Block("x", "i0", str(v), ("o", "f")), Permute("x", ("f", "o")))) for v in (4, 8)]
-    return layouts_of("x", [Layout(IDENTITY), *lifted])
 
 
 def run_closure(inputs, n):

@@ -20,7 +20,7 @@ kernel of OMEN (Ziogas et al., SC'19) on one node and distributes it as SC19 doe
 
 ```python
 from relayout.frontends.sdfg import apply_requests
-from relayout.kernels.omen_sse.sse import sse
+from relayout.corpus.omen_sse.sse import sse
 from relayout.ops import ArraySpec, lower
 from relayout.requests import parse_requests
 
@@ -54,7 +54,7 @@ lower(distributed.run([ArraySpec(name, 5) for name in ...], ranks=4))   # each a
 | `relayout.frontends.sdfg` | an SDFG rewritten for laid-out arrays: one rewrite for every layout, library nodes by their rules, MPI library nodes through packed buffers; `zip` / `unzip` along a dimension (data-dependent indices select their part), `zip` of different element types into an array of structs, and `cast` through FP-Arena (extra `fparena`) |
 | `relayout.frontends.schedule` | the schedule after a layout: maps tiled to the blocks their arrays are cut into, tiles over flat arrays merged back, map nests ordered by stride |
 | `relayout.search` | which layout each array takes: a program as a line of kernels, each kernel's layouts costed by the LogGP model or measured, one trajectory per array chosen globally (Viterbi DP, with greedy and enumeration as checks) and applied with conversions between segments |
-| `relayout.kernels`, `relayout.benchmarks` | the OMEN SSE kernel (Python, Fortran, MPI) and the layout witness kernels, each with a numpy oracle |
+| `relayout.corpus` (`corpus/`) | the input programs: the OMEN SSE kernel (Python, Fortran, MPI), the layout witness kernels and Fortran inputs, each with a numpy oracle; the layouts tried on them live in `tests/layout_candidates.py` |
 
 The request format and the lowering are described in [docs/layout.md](docs/layout.md).
 

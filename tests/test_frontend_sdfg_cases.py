@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 import dace
-from conftest import variant
+from tests.conftest import variant
 from relayout.frontends.sdfg import physical_subset, prepare, relayout_array, rewrite_subscripts
 from relayout.layout import IndexMap
 from relayout.ops import ArraySpec, Block, Pad, Permute, Shuffle, run

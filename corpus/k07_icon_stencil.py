@@ -25,8 +25,6 @@ simulations on GPUs," GMD 2022 ((nproma, nlev, nblocks) unit-stride order); SC26
 import dace
 import numpy
 
-from relayout.benchmarks import layouts_of
-from relayout.search.layouts import permutations
 
 NI, NJ, NK = dace.symbol("NI"), dace.symbol("NJ"), dace.symbol("NK")
 WV, WH = 0.5, 0.25
@@ -50,11 +48,6 @@ def oracle(A):
 
 def make_inputs(ni, nj, nk, seed=0):
     return {"A": numpy.random.default_rng(seed).random((ni, nj, nk))}
-
-
-def candidates():
-    """The global layout candidates: every dimension permutation of ``A`` (vertical-first, etc.)."""
-    return layouts_of("A", permutations("A", 3))
 
 
 def run_closure(inputs, ni, nj, nk):

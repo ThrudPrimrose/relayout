@@ -23,8 +23,6 @@ paper SS IV-B2 (transpose microbenchmark, Block primitive).
 import dace
 import numpy
 
-from relayout.benchmarks import layouts_of
-from relayout.search.layouts import blockings, permutations
 
 N = dace.symbol("N")
 
@@ -41,14 +39,6 @@ def oracle(A):
 
 def make_inputs(n, seed=0):
     return {"A": numpy.random.default_rng(seed).random((n, n))}
-
-
-def candidates():
-    """The Permute family (row- vs column-major storage of ``A``) and the Block family (rows of ``A`` in
-    contiguous ``[T, N]`` panels for T in {8, 16, 32})."""
-    cands = layouts_of("A", permutations("A", 2))
-    cands.update(layouts_of("A", blockings("A", 2, (8, 16, 32))))
-    return cands
 
 
 def run_closure(inputs, n):

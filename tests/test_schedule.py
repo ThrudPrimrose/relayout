@@ -6,7 +6,7 @@ computes what the program computed."""
 import numpy as np
 
 import dace
-from conftest import variant
+from tests.conftest import variant
 from dace import nodes
 from relayout.frontends.schedule import canonicalize_schedule
 from relayout.frontends.sdfg import prepare, relayout_array

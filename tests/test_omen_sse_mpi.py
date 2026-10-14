@@ -5,9 +5,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from conftest import flang_missing, mpi_or_skip
+from tests.conftest import flang_missing, mpi_or_skip
 from relayout.frontends.sdfg import apply_requests
-from relayout.kernels import omen_sse
+from relayout.corpus import omen_sse
 from relayout.requests import parse_requests
 
 pytestmark = pytest.mark.mpi
@@ -65,7 +65,7 @@ def local_problem(comm):
 
 
 def test_python_frontend_mpi():
-    from relayout.kernels.omen_sse.sse_mpi import sse_mpi
+    from relayout.corpus.omen_sse.sse_mpi import sse_mpi
 
     comm = comm_or_skip()
     args, expected, sizes = local_problem(comm)
@@ -91,7 +91,7 @@ LAID_OUT = {
 def test_a_laid_out_kernel_runs_distributed():
     """End to end: the distributed SSE with its arguments and its Alltoall buffers laid out computes the
     reference on every rank."""
-    from relayout.kernels.omen_sse.sse_mpi import sse_mpi
+    from relayout.corpus.omen_sse.sse_mpi import sse_mpi
 
     comm = comm_or_skip()
     args, expected, sizes = local_problem(comm)

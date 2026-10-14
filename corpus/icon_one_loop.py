@@ -33,8 +33,6 @@ order); SC26 layout paper SS IV-D.
 import dace
 import numpy
 
-from relayout.benchmarks import layouts_of
-from relayout.search.layouts import permutations
 
 NB, NLEV, NPROMA = dace.symbol("NB"), dace.symbol("NLEV"), dace.symbol("NPROMA")
 
@@ -73,17 +71,6 @@ def make_inputs(nb=2, nlev=16, nproma=8, seed=0):
         "wgtfac_e": rng.random((nb, nlev, nproma)),
         "vt": rng.random((nb, nlev, nproma)),
     }
-
-
-def candidates():
-    """The global layout candidates: every dimension permutation of each read field (identity
-    included). ``vn`` is the vertical-stride-sensitive field read at ``jk`` and ``jk-1``; ``vt`` and
-    ``wgtfac_e`` are the level-difference operands. Every permute is transparent, so all candidates
-    reproduce the oracle -- the sweep only picks the fastest."""
-    cands = {}
-    for arr in ("vn", "vt", "wgtfac_e"):
-        cands.update(layouts_of(arr, permutations(arr, 3)))
-    return cands
 
 
 def run_closure(inputs, nb=2, nlev=16, nproma=8):

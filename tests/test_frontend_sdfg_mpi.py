@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 import dace
-from conftest import LAYOUT_CASES, mpi_or_skip, variant
+from tests.conftest import LAYOUT_CASES, mpi_or_skip, variant
 from dace import nodes
 from relayout.frontends.sdfg import pack_mpi_buffers, relayout_array
 from dace.libraries.standard.nodes.copy import CopyLibraryNode

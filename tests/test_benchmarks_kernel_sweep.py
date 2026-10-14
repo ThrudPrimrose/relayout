@@ -6,8 +6,15 @@ orientation is the layout decision), and the sweep compiles/runs/verifies every 
 the numpy oracle. The invariant asserted here is CORRECTNESS: every transparent candidate reproduces
 the oracle and ``best()`` returns a correct one. Timing is not asserted (noisy on a shared host)."""
 
-from relayout.benchmarks import build, k04_mvt, k11_thomas, k12_dlt_stencil, k15_colstore
+from relayout.search.candidates import build
+from relayout.corpus import k04_mvt, k11_thomas, k12_dlt_stencil, k15_colstore
 from relayout.search.measure import best, compute_timer, sweep, time_call
+from tests.layout_candidates import (
+    k04_mvt_candidates,
+    k11_thomas_candidates,
+    k12_dlt_stencil_candidates,
+    k15_colstore_candidates,
+)
 
 
 def test_k04_mvt_layout_sweep_all_verify():
@@ -15,7 +22,7 @@ def test_k04_mvt_layout_sweep_all_verify():
     n = 24
     inputs = k04_mvt.make_inputs(n)
     reference = k04_mvt.oracle(inputs["A"], inputs["y1"], inputs["y2"])
-    candidates = build(k04_mvt.mvt, k04_mvt.candidates())
+    candidates = build(k04_mvt.mvt, k04_mvt_candidates())
 
     results = sweep(candidates, k04_mvt.run_closure(inputs, n), reference, timer=time_call, reps=1, warmup=0)
     assert {c.name for c in candidates} == {"identity", "A:perm10"}
@@ -28,7 +35,7 @@ def test_k15_colstore_layout_sweep_all_verify():
     n, c = 32, 8
     inputs = k15_colstore.make_inputs(n, c)
     reference = k15_colstore.oracle(inputs["T"])
-    candidates = build(k15_colstore.colsum, k15_colstore.candidates())
+    candidates = build(k15_colstore.colsum, k15_colstore_candidates())
 
     results = sweep(candidates, k15_colstore.run_closure(inputs, n, c), reference, timer=time_call, reps=1, warmup=0)
     assert all(r.correct for r in results), [(r.name, r.error) for r in results]
@@ -41,7 +48,7 @@ def test_k11_thomas_layout_sweep_timed():
     k, nb = 12, 40
     inputs = k11_thomas.make_inputs(k, nb)
     reference = k11_thomas.oracle(inputs["a"], inputs["b"], inputs["c"], inputs["d"])
-    candidates = build(k11_thomas.thomas, k11_thomas.candidates())
+    candidates = build(k11_thomas.thomas, k11_thomas_candidates())
 
     results = sweep(candidates, k11_thomas.run_closure(inputs, k, nb), reference, timer=compute_timer, reps=2, warmup=1)
     assert {c.name for c in candidates} == {"interleaved", "system_major"}
@@ -56,7 +63,7 @@ def test_k12_dlt_stencil_lifted_sweep_all_verify():
     n = 32  # divisible by every block factor
     inputs = k12_dlt_stencil.make_inputs(n)
     reference = k12_dlt_stencil.oracle(inputs["x"])
-    candidates = build(k12_dlt_stencil.stencil, k12_dlt_stencil.candidates())
+    candidates = build(k12_dlt_stencil.stencil, k12_dlt_stencil_candidates())
     assert {c.name for c in candidates} == {"identity", "x:dlt4", "x:dlt8"}
 
     results = sweep(candidates, k12_dlt_stencil.run_closure(inputs, n), reference, timer=time_call, reps=1, warmup=0)

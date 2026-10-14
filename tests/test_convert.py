@@ -13,7 +13,7 @@ import ml_dtypes
 import numpy as np
 import pytest
 
-from conftest import LAYOUT_CASES, LAYOUT_SHAPE
+from tests.conftest import LAYOUT_CASES, LAYOUT_SHAPE
 from relayout.convert import Conversion, Group, Member, compile_host, device_source, host_source
 from relayout.layout import IndexMap
 from relayout.ops import ArraySpec, Block, Pad, Permute, Shuffle, eval_index, run

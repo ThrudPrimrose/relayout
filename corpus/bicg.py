@@ -20,8 +20,6 @@ internally and would hide the read-orientation conflict.
 import dace
 import numpy
 
-from relayout.benchmarks import layouts_of
-from relayout.search.layouts import permutations
 
 N, M = dace.symbol("N"), dace.symbol("M")
 
@@ -40,12 +38,6 @@ def oracle(A, p, r):
 def make_inputs(n, m, seed=0):
     rng = numpy.random.default_rng(seed)
     return {"A": rng.random((n, m)), "p": rng.random(m), "r": rng.random(n)}
-
-
-def candidates():
-    """The global layout candidates for this kernel: every dimension permutation of ``A`` (row-major
-    vs column-major), the read-orientation conflict the pair nest exposes."""
-    return layouts_of("A", permutations("A", 2))
 
 
 def run_closure(inputs, n, m):

@@ -29,9 +29,6 @@ Transport Simulations," SC'19 (Gordon Bell finalist; arXiv:1912.10024); npbench 
 import dace
 import numpy
 
-from relayout.benchmarks import apply_layout
-from relayout.ops import Permute
-from relayout.search.layouts import Layout
 
 NA, NE = dace.symbol("NA"), dace.symbol("NE")
 Nkz, NB, Nqz, Nw, Norb, N3D = 2, 2, 2, 2, 3, 2  # small compile-time block/momentum dims (npbench 'S' preset)
@@ -88,16 +85,6 @@ def make_inputs(na, ne, seed=0):
         "G": cplx(Nkz, ne, na, Norb, Norb),
         "D": cplx(Nqz, Nw, na, NB, N3D, N3D),
     }
-
-
-def candidates():
-    """The batch-axis order of ``G``: energy-outer (identity) vs atom-outer (swap NE and NA, so the
-    gathered neighbour's energy window is contiguous) -- one transparent Permute, the k10 decision."""
-
-    def atom_outer(sdfg):
-        apply_layout(sdfg, "G", Layout("atom_outer", (Permute("G", ("i0", "i2", "i1", "i3", "i4")),)))
-
-    return {"e_outer": (lambda sdfg: None), "atom_outer": atom_outer}
 
 
 def run_closure(inputs, na, ne):

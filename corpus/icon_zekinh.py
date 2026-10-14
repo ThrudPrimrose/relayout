@@ -42,8 +42,6 @@ storage order); SC26 layout paper (indirect-stencil connectivity layout).
 import dace
 import numpy
 
-from relayout.benchmarks import layouts_of
-from relayout.search.layouts import permutations
 
 NB, NLEV, NPROMA = dace.symbol("NB"), dace.symbol("NLEV"), dace.symbol("NPROMA")
 
@@ -92,23 +90,6 @@ def make_inputs(nb, nlev, nproma, seed=0):
         "edge_blk": rng.integers(0, nb, size=(nb, nproma, 3)).astype(numpy.int64),
         "z_kin_hor_e": rng.random((nb, nlev, nproma)),
     }
-
-
-def candidates():
-    """The global layout candidates, each a single-array dimension permutation (identity included):
-
-      * ``z_kin_hor_e`` -- gathered-field orientation over ``[NB, NLEV, NPROMA]`` (blocked ICON default
-        vs level-contiguous, etc.). The permute carries through the double indirection's nested SDFG.
-      * ``edge_idx`` / ``edge_blk`` -- connectivity-table orientation over ``[NB, NPROMA, 3]``. Read by
-        affine subscripts, so every permutation carries (like e6's ``cell_idx`` / ``vert_idx``).
-
-    Every permute is transparent, so all candidates reproduce the oracle; the sweep only picks the fastest physical layout.
-
-    """
-    cands = {}
-    for arr in ("z_kin_hor_e", "edge_idx", "edge_blk"):
-        cands.update(layouts_of(arr, permutations(arr, 3)))
-    return cands
 
 
 def run_closure(inputs, nb, nlev, nproma):

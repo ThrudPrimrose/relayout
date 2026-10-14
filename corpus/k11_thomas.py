@@ -18,9 +18,6 @@ QJRMS'15 (ICON vertical solvers).
 import dace
 import numpy
 
-from relayout.benchmarks import apply_layout
-from relayout.ops import Permute
-from relayout.search.layouts import Layout
 
 K, NB = dace.symbol("K"), dace.symbol("NB")
 
@@ -73,16 +70,6 @@ def make_inputs(k, nb, seed=0):
     b = a + c + rng.random((k, nb)) + 1.0  # diagonally dominant
     d = rng.random((k, nb)) + 0.1
     return {"a": a, "b": b, "c": c, "d": d}
-
-
-def candidates():
-    """interleaved (K,NB) vs system-major (NB,K): permute all four coefficient arrays."""
-
-    def system_major(sdfg):
-        for array in "abcd":
-            apply_layout(sdfg, array, Layout("system_major", (Permute(array, ("i1", "i0")),)))
-
-    return {"interleaved": (lambda sdfg: None), "system_major": system_major}
 
 
 def run_closure(inputs, k, nb):

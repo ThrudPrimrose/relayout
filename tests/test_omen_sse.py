@@ -6,9 +6,9 @@ import tempfile
 import numpy as np
 import pytest
 
-from conftest import flang_missing
-from relayout.kernels import omen_sse
-from relayout.kernels.omen_sse.sse import sse
+from tests.conftest import flang_missing
+from relayout.corpus import omen_sse
+from relayout.corpus.omen_sse.sse import sse
 
 HERE = pathlib.Path(omen_sse.__file__).parent
 SIZE = omen_sse.SIZES["S"]

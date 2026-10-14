@@ -54,9 +54,6 @@ table ``tsg``; the edge-index table stays a flat CSR-style gather index.
 import dace
 import numpy
 
-from relayout.benchmarks import layouts_of, shuffled
-from relayout.ops import Pad
-from relayout.search.layouts import Layout, permutations
 
 NC, NE, V = dace.symbol("NC"), dace.symbol("NE"), dace.symbol("V")
 
@@ -123,27 +120,6 @@ def make_inputs(n=8, seed=0):
     x = numpy.ascontiguousarray(rng.random(ncells))
     tab, tsg = make_padded_gather(e0, e1, ncells)
     return {"x": x, "e0": e0, "e1": e1, "tab": tab, "tsg": tsg}
-
-
-def candidates():
-    """The global layout candidates:
-
-      * ``identity``    -- AoS ``[NC, V]`` sign table, natural cell order.
-      * ``tsg:perm10``  -- SoA ``[V, NC]`` sign table (Permute).
-      * ``tsg:pad2`` / ``tsg:pad4`` -- grow the valence axis to ``[NC, V+p]`` (Pad).
-      * ``x:mesh_cyc`` / ``x:mesh_rev`` -- renumber the cell field ``x`` by a closed-form mesh reorder
-        (Shuffle): a cyclic shift and a reflection, bijections on ``[0, NC)`` for any ``NC``.
-
-    Every candidate is transparent, so all reproduce the oracle -- the sweep only picks the layout.
-    """
-    cands = layouts_of("tsg", permutations("tsg", 2))
-    cands.update(layouts_of("tsg", [Layout(f"pad{extra}", (Pad("tsg", "i1", str(extra)),)) for extra in (2, 4)]))
-    mesh = [
-        shuffled("x", "mesh_cyc", "(i0 + 1) % NC", "(i0 + NC - 1) % NC"),
-        shuffled("x", "mesh_rev", "NC - 1 - i0", "NC - 1 - i0"),
-    ]
-    cands.update(layouts_of("x", mesh))
-    return cands
 
 
 def run_closure(inputs, n=8):

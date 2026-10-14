@@ -7,7 +7,7 @@ import copy
 import dace
 import numpy as np
 import pytest
-from conftest import LAYOUT_CASES, variant
+from tests.conftest import LAYOUT_CASES, variant
 from dace import nodes
 from dace.libraries.blas.nodes.symm import Symm
 from dace.libraries.blas.nodes.syrk import Syrk

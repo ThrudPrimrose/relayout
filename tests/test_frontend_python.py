@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from conftest import LAYOUT_CASES, LAYOUT_SHAPE, mpi_or_skip
+from tests.conftest import LAYOUT_CASES, LAYOUT_SHAPE, mpi_or_skip
 from relayout.convert import from_layout, to_layout
 from relayout.frontends.python import LayoutError, Unzipped, Zipped, rewrite
 from relayout.layout import IndexMap

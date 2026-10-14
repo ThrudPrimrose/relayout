@@ -42,18 +42,8 @@ layout decision).
 import dace
 import numpy
 
-from relayout.benchmarks import layouts_of, shuffled
-from relayout.search.layouts import IDENTITY, Layout
 
 N = dace.symbol("N")
-
-#: The Eytzinger stand-in (median-to-front) plus two more closed-form transparent reorderings; each a
-#: bijection on ``[0, N)`` for any ``N``.
-SHUFFLES = (
-    shuffled("A", "eytzinger", "(i0 + N // 2) % N", "(i0 + N - N // 2) % N"),
-    shuffled("A", "cyc", "(i0 + 1) % N", "(i0 + N - 1) % N"),
-    shuffled("A", "rev", "N - 1 - i0", "N - 1 - i0"),
-)
 
 
 @dace.program
@@ -76,12 +66,6 @@ def make_inputs(n, seed=0):
     """A sorted key set of length ``n`` (Eytzinger operates on sorted keys)."""
     rng = numpy.random.default_rng(seed)
     return {"A": numpy.sort(rng.random(n))}
-
-
-def candidates():
-    """The global layout candidates for this kernel: the unshuffled key array plus
-    each registered element reordering of ``A`` (Eytzinger stand-in, cyclic, reversal)."""
-    return layouts_of("A", [Layout(IDENTITY), *SHUFFLES])
 
 
 def run_closure(inputs, n):

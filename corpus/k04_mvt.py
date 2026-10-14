@@ -15,8 +15,6 @@ form so the layout is honest -- BLAS packs operands internally and would hide it
 import dace
 import numpy
 
-from relayout.benchmarks import layouts_of
-from relayout.search.layouts import permutations
 
 N = dace.symbol("N")
 
@@ -35,11 +33,6 @@ def oracle(A, y1, y2):
 def make_inputs(n, seed=0):
     rng = numpy.random.default_rng(seed)
     return {"A": rng.random((n, n)), "y1": rng.random(n), "y2": rng.random(n)}
-
-
-def candidates():
-    """The global layout candidates for this kernel: every dimension permutation of ``A``."""
-    return layouts_of("A", permutations("A", 2))
 
 
 def run_closure(inputs, n):

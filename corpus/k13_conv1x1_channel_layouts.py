@@ -20,17 +20,11 @@ Georganas et al., "Anatomy of High-Performance Deep Learning Convolutions on SIM
 SC'18 (blocked conv layouts).
 """
 
-import itertools
-
 import dace
 import numpy
 
-from relayout.benchmarks import layouts_of
-from relayout.ops import Block, Permute
-from relayout.search.layouts import IDENTITY, Layout
 
 N, C, H, W, K = (dace.symbol(s) for s in ("N", "C", "H", "W", "K"))
-CBLOCK = 16  # nChw16c SIMD-lane panel width (C must be divisible by it for the Block candidate)
 
 
 @dace.program
@@ -46,14 +40,6 @@ def oracle(X, Wt):
 def make_inputs(n, c, h, w, k, seed=0):
     rng = numpy.random.default_rng(seed)
     return {"X": rng.random((n, c, h, w)), "Wt": rng.random((k, c))}
-
-
-def candidates():
-    """Permute family over X (NCHW and its 23 other dimension orders) plus the nChw16c Block of X's C axis."""
-    orders = [order for order in itertools.permutations(range(4)) if order != (0, 1, 2, 3)]
-    permuted = [Layout(f"perm{''.join(map(str, o))}", (Permute("X", tuple(f"i{d}" for d in o)),)) for o in orders]
-    panels = (Block("X", "i1", str(CBLOCK), ("cb", "cl")), Permute("X", ("i0", "cb", "i2", "i3", "cl")))
-    return layouts_of("X", [Layout(IDENTITY), *permuted, Layout(f"nChw{CBLOCK}c", panels)])
 
 
 def run_closure(inputs, n, c, h, w, k):

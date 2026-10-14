@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 import dace
-from conftest import variant
+from tests.conftest import variant
 from relayout.frontends.sdfg import apply_requests, relayout_array, unzip_array, zip_arrays
 from relayout.ops import ArraySpec, Permute, run
 from relayout.requests import parse_requests

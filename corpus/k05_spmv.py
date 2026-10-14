@@ -37,9 +37,6 @@ gather isolation: Pad width, Block rows, Permute ELL<->SELL).
 import dace
 import numpy
 
-from relayout.benchmarks import layouts_of
-from relayout.ops import Pad
-from relayout.search.layouts import Layout, blockings, permutations
 
 NR = dace.symbol("NR")  # number of rows (matrix and output length)
 NC = dace.symbol("NC")  # number of columns (length of the gathered vector x)
@@ -109,23 +106,6 @@ def make_inputs(side=8, seed=0):
         raise ValueError(f"k05_spmv: grid5(side={side}) has max degree {w}, expected W={W}")
     x = numpy.random.default_rng(seed).random(n)
     return {"ecol": ecol, "eval_": eval_, "x": x}
-
-
-def candidates():
-    """The global layout candidates for the ELL matrices:
-
-      * ``eval_:perm10`` / ``ecol:perm10`` -- row-major ELL ``[NR, W]`` vs column-major SELL slab ``[W, NR]``
-        (Permute of the value / index matrix).
-      * ``eval_:block0x*`` -- row tiling of the value matrix (Block of the row axis ``NR``).
-      * ``eval_:pad_w`` -- grow the ragged width ``W`` to ``2 * W`` lanes (Pad); the extra lanes are never
-        read (the map iterates ``0:W``), so the pad is transparent.
-
-    Every candidate is transparent, so all reproduce the oracle."""
-    cands = layouts_of("eval_", permutations("eval_", 2))
-    cands.update(layouts_of("ecol", permutations("ecol", 2)))
-    cands.update(layouts_of("eval_", blockings("eval_", 2, (8, 16, 32))))
-    cands.update(layouts_of("eval_", [Layout("pad_w", (Pad("eval_", "i1", str(W)),))]))
-    return cands
 
 
 def run_closure(inputs, side):

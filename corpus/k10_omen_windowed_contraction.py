@@ -27,9 +27,6 @@ finalist; arXiv:1912.10024); NPBench 'sselfeng' (Ziogas et al., ICS'21); SC26 la
 import dace
 import numpy
 
-from relayout.benchmarks import apply_layout
-from relayout.ops import Permute
-from relayout.search.layouts import Layout
 
 NA, NE = dace.symbol("NA"), dace.symbol("NE")
 M = 4  # ~ Norb orbitals per block (small: a block spans a few cache lines)
@@ -71,16 +68,6 @@ def make_inputs(na, ne, seed=0):
     rng = numpy.random.default_rng(seed)
     cplx = lambda *s: (rng.random(s) + 1j * rng.random(s)).astype(numpy.complex128)
     return {"H": cplx(na, ne, M, M), "X": cplx(na, ne, M, M), "D": cplx(W, M, M)}
-
-
-def candidates():
-    """The global layout candidates: the dimension order of ``G``'s two batch axes -- consumer
-    order (NA, NE) identity vs producer order (NE, NA) via a transparent Permute."""
-
-    def producer_order(sdfg):
-        apply_layout(sdfg, "G", Layout("ea", (Permute("G", ("i1", "i0", "i2", "i3")),)))
-
-    return {"ae_consumer": (lambda sdfg: None), "ea_producer": producer_order}
 
 
 def run_closure(inputs, na, ne):

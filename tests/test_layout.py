@@ -7,7 +7,7 @@ import itertools
 import numpy as np
 import pytest
 
-from conftest import LAYOUT_CASES, LAYOUT_SHAPE
+from tests.conftest import LAYOUT_CASES, LAYOUT_SHAPE
 from relayout.layout import IndexMap
 from relayout.ops import (
     ArraySpec,

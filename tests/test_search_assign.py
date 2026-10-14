@@ -9,7 +9,7 @@ import random
 import dace
 import numpy as np
 import pytest
-from conftest import variant
+from tests.conftest import variant
 
 from relayout.frontends.sdfg import prepare
 from relayout.search.assign import (

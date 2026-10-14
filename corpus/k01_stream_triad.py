@@ -18,9 +18,6 @@ Computers," IEEE TCCA Newsletter, 1995 (STREAM Triad); SC26 layout paper (fragme
 import dace
 import numpy
 
-from relayout.benchmarks import layouts_of
-from relayout.ops import Block
-from relayout.search.layouts import IDENTITY, Layout
 
 N = dace.symbol("N")
 Q = 1.5
@@ -39,15 +36,6 @@ def oracle(b, c):
 def make_inputs(n, seed=0):
     rng = numpy.random.default_rng(seed)
     return {"b": rng.random(n), "c": rng.random(n)}
-
-
-def candidates():
-    """Block family over each read operand (unblocked + ``[N/T, T]`` tiles for T in {8, 16})."""
-    cands = {}
-    for arr in ("b", "c"):
-        blocks = [Layout(f"block{t}", (Block(arr, "i0", str(t), ("o", "f")),)) for t in (8, 16)]
-        cands.update(layouts_of(arr, [Layout(IDENTITY), *blocks]))
-    return cands
 
 
 def run_closure(inputs, n):

@@ -26,7 +26,6 @@ transformation system for heterogeneous computing," InPar 2012 (ASTA = AoSoA). P
 import dace
 import numpy
 
-from relayout.benchmarks import zip_fields
 
 N = dace.symbol("N")
 SCALE = 2.0
@@ -46,16 +45,6 @@ def oracle(re, im):
 def make_inputs(n, seed=0):
     rng = numpy.random.default_rng(seed)
     return {"re": rng.random(n), "im": rng.random(n)}
-
-
-def candidates():
-    """AoS / SoA / AoSoA layouts of the (re, im) complex array: Zip, and Zip then Block (AoSoA)."""
-    return {
-        "unzipped_soa": lambda sdfg: None,
-        "zipped_aos": lambda sdfg: zip_fields(sdfg, ["re", "im"], "cplx"),
-        "aosoa_4": lambda sdfg: zip_fields(sdfg, ["re", "im"], "cplx", 4),
-        "aosoa_8": lambda sdfg: zip_fields(sdfg, ["re", "im"], "cplx", 8),
-    }
 
 
 def run_closure(inputs, n):
