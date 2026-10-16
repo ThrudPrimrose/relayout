@@ -17,11 +17,13 @@ PRECISION_TYPES = {
 }
 
 
-def cast_array(sdfg: dace.SDFG, name: str, precision: Precision) -> str:
-    """``sdfg``'s array ``name`` in the element type of ``precision``, by FP-Arena's type change (extra
-    ``fparena``): a transient in place, an argument through a transient converted in and out; returns the
-    name the program now works on."""
-    from fp_arena.transformations.change_fp_types import change_fptype  # the optional extra 'fparena'
+def cast_array(sdfg: dace.SDFG, name: str, precision: Precision, convert: bool = True) -> str:
+    """``sdfg``'s array ``name`` in the element type of ``precision``, by FP-Arena's type change and propagation
+    (extra ``fparena``). Every other floating-point argument keeps its type; the transients the array reaches take
+    the type the propagation gives them. A transient is cast in place; an argument works through a transient
+    converted in and out, or, without ``convert``, is passed in the new type by the caller. Returns the name the
+    program now works on."""
+    from fp_arena.transformations import change_and_propagate_fp_types  # the optional extra 'fparena'
 
     target = PRECISION_TYPES.get(precision)
     if target is None or name not in sdfg.arrays:
@@ -29,6 +31,17 @@ def cast_array(sdfg: dace.SDFG, name: str, precision: Precision) -> str:
     desc = array_desc(sdfg, name)
     if desc.dtype == target:
         return name
-    argument = not desc.transient  # change_fptype makes the descriptor it renames transient
-    change_fptype(sdfg, desc.dtype, target, cast_in_and_out_data=argument, arrays_to_replace={name})
-    return f"{name}_{target.to_string()}" if argument else name
+    pins = {
+        other: other_desc.dtype
+        for other, other_desc in sdfg.arrays.items()
+        if other != name and not other_desc.transient and other_desc.dtype in PRECISION_TYPES.values()
+    }
+    pins[name] = target
+    argument = not desc.transient  # FP-Arena makes this descriptor the transient working copy
+    change_and_propagate_fp_types(sdfg, pins, preserve_interface=convert)
+    if not argument or not convert:
+        return name
+    # FP-Arena's working copy, under the name the Python pass gives it (a zip's struct member is named after it).
+    working = f"{name}_{target.to_string()}"
+    sdfg.replace_dict({f"fp_casted_{working}": working})
+    return working

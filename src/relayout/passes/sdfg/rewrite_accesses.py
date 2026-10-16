@@ -248,17 +248,25 @@ def conversion(
 
 
 def move_array(
-    sdfg: dace.SDFG, name: str, target: str, placement: Placement, pending: list[MpiBuffer] | None = None
+    sdfg: dace.SDFG,
+    name: str,
+    target: str,
+    placement: Placement,
+    pending: list[MpiBuffer] | None = None,
+    convert: bool = True,
 ) -> None:
     """Move ``name``'s accesses to ``target`` (described in ``sdfg``) through ``placement``. An argument
     keeps its descriptor for the caller and is converted into the target at the start (when read, or
     written only in part: the conversion back must not overwrite the cells the program leaves) and back
-    at the end (when written); a transient is removed."""
+    at the end (when written); a transient is removed. Without ``convert`` an argument moved onto itself
+    (``target == name``) is passed laid out by the caller and gets no conversion."""
     desc = sdfg.arrays[name]
     shape = [str(extent) for extent in desc.shape]
     read, written = is_read(sdfg, name), is_written(sdfg, name)
     keeps_cells = written and not fully_written(sdfg, name)
     rewrite_accesses(sdfg, name, target, placement, pending=pending)
+    if not convert:
+        return
     if desc.transient:
         if name != target:
             sdfg.remove_data(name, validate=False)

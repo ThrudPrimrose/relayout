@@ -66,6 +66,23 @@ def test_laid_out_arguments_and_transients_compute_the_same(a_ops: list, b_ops: 
     np.testing.assert_allclose(b, reference(a))
 
 
+def test_unconverted_arguments_are_passed_laid_out() -> None:
+    """``convert=False``: the program takes its arguments in their layout (here transposed) and converts
+    nothing itself; the caller lays the input out and reads the output back through the same layout."""
+    sdfg = stencil.to_sdfg(simplify=True)
+    variant(sdfg, "unconverted")
+    transposed = layout([Permute("A", ("i1", "i0"))], ["N", "M"])
+    assert relayout_array(sdfg, "A", transposed, convert=False) == "A"
+    assert relayout_array(sdfg, "B", transposed, convert=False) == "B"
+    sdfg.validate()
+    assert [str(e) for e in sdfg.arrays["A"].shape] == ["M", "N"] and not sdfg.arrays["A"].transient
+    assert not any(block.label.startswith(("relayout_in_", "relayout_out_")) for block in sdfg.nodes())
+    a = np.random.default_rng(2).standard_normal((6, 12))
+    b_t = np.zeros((12, 6))
+    sdfg(A=np.ascontiguousarray(a.T), B=b_t, N=6, M=12)
+    np.testing.assert_allclose(b_t.T, reference(a))
+
+
 @pytest.mark.parametrize("case", LAYOUT_CASES)
 def test_every_layout_case_computes_the_same_on_arguments_and_transients(case: str) -> None:
     """End to end: one layout case on the input, the output and the transient of a compiled program."""

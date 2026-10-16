@@ -172,7 +172,7 @@ wheels = [
 [[package]]
 name = "fp-arena"
 version = "0.1.0"
-source = { git = "https://github.com/spcl/FP-Arena.git?rev=810eca0e7d56ac35bd38bf108c1a96c8cecf9775#810eca0e7d56ac35bd38bf108c1a96c8cecf9775" }
+source = { git = "https://github.com/spcl/FP-Arena.git?rev=08465359af8666927ab6b53bcfdce1865a6c34e1#08465359af8666927ab6b53bcfdce1865a6c34e1" }
 dependencies = [
     { name = "dace" },
     { name = "numpy" },
@@ -705,7 +705,7 @@ dev = [
 requires-dist = [
     { name = "dace" },
     { name = "dace-fortran", marker = "extra == 'fortran'", git = "https://github.com/spcl/dace-fortran.git?branch=main" },
-    { name = "fp-arena", marker = "extra == 'fparena'", git = "https://github.com/spcl/FP-Arena.git?rev=810eca0e7d56ac35bd38bf108c1a96c8cecf9775" },
+    { name = "fp-arena", marker = "extra == 'fparena'", git = "https://github.com/spcl/FP-Arena.git?rev=08465359af8666927ab6b53bcfdce1865a6c34e1" },
     { name = "islpy" },
     { name = "mpi4py", marker = "extra == 'mpi'" },
     { name = "nanobind", marker = "extra == 'fortran'" },

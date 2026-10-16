@@ -14,7 +14,9 @@ becomes the packed row-major buffer of the layout's extents, and every access fo
 
 A transient is laid out in place. An argument of the SDFG keeps its descriptor for the caller: the
 program works on a transient ``laid_<name>``, converted in at the start (when it is read) and out at
-the end (when it is written) by maps over the logical index space.
+the end (when it is written) by maps over the logical index space. With ``convert=False`` an argument
+is laid out in place too: the caller passes the laid-out buffer (:mod:`relayout.convert`), so the
+program's signature changes and no conversion runs inside it.
 """
 
 import dace
@@ -29,22 +31,26 @@ from relayout.passes.sdfg.rewrite_accesses import move_array
 __all__ = ["relayout_array"]
 
 
-def relayout_array(sdfg: dace.SDFG, name: str, layout: IndexMap, pending: list[MpiBuffer] | None = None) -> str:
+def relayout_array(
+    sdfg: dace.SDFG, name: str, layout: IndexMap, pending: list[MpiBuffer] | None = None, convert: bool = True
+) -> str:
     """Lay ``sdfg``'s array ``name`` out by ``layout`` (see the module docstring); returns the name the
-    program now works on (``name`` for a transient, ``laid_<name>`` for an argument). Its MPI buffers are
-    packed at once (:func:`pack_mpi_buffers`), or recorded in ``pending`` for the caller to pack once every
-    array is laid out."""
+    program now works on (``name`` for a transient or, without ``convert``, an argument; ``laid_<name>``
+    for a converted argument). Its MPI buffers are packed at once (:func:`pack_mpi_buffers`), or recorded
+    in ``pending`` for the caller to pack once every array is laid out."""
     desc = array_desc(sdfg, name)
     if layout.is_identity():
         return name
-    laid = name if desc.transient else laid_name(name)
-    laid_desc = laid_out_descriptor(desc, layout, transient=True)
-    if desc.transient:
+    in_place = desc.transient or not convert
+    laid = name if in_place else laid_name(name)
+    laid_desc = laid_out_descriptor(desc, layout, transient=desc.transient)
+    if in_place:
         sdfg.arrays[name] = laid_desc
     else:
+        laid_desc.transient = True
         sdfg.add_datadesc(laid, laid_desc)
     own = [] if pending is None else pending
-    move_array(sdfg, name, laid, Laid(layout), own)
+    move_array(sdfg, name, laid, Laid(layout), own, convert=convert)
     if pending is None:
         pack_mpi_buffers(own)
     propagation.propagate_memlets_sdfg(sdfg)

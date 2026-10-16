@@ -115,6 +115,27 @@ def test_a_tiled_map_merges_over_flat_arrays_and_keeps_its_tiles_over_blocked_on
         np.testing.assert_allclose(b, 2 * a)
 
 
+@dace.program
+def weighted(A: dace.float64[N, M], c: dace.float64[M], B: dace.float64[N, M]):  # noqa: N803
+    for i, j in dace.map[0:N, 0:M]:
+        B[i, j] = A[i, j] * c[j]
+
+
+def test_the_laid_out_unit_stride_parameter_goes_innermost() -> None:
+    """Transposed ``A`` and ``B`` are unit-stride along ``i`` and ``c`` along ``j``, a tie for the stride ordering;
+    naming the laid-out arrays puts ``i`` innermost."""
+    sdfg = weighted.to_sdfg(simplify=True)
+    variant(sdfg, "laid_innermost")
+    for array in ("A", "B"):
+        relayout_array(sdfg, array, layout([Permute("A", ("i1", "i0"))], ["N", "M"]), convert=False)
+    canonicalize_schedule(sdfg, {"A", "B"})
+    assert nesting(sdfg) == [["j", "i"]]
+    a, c = np.random.default_rng(3).random((5, 7)), np.random.default_rng(4).random(7)
+    b_t = np.zeros((7, 5))
+    sdfg(A=a.T.copy(), c=c, B=b_t, N=5, M=7)
+    np.testing.assert_allclose(b_t.T, a * c)
+
+
 def test_a_map_not_starting_at_zero_keeps_its_blocked_accesses() -> None:
     """Only a map from 0 by 1 tiles into whole blocks; one from 1 is left as it is (and does not stall the pass)."""
     sdfg = prepare(interior.to_sdfg(simplify=True))
